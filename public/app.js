@@ -1,25 +1,61 @@
 const state = {
   network: null,
-  lastProof: null,
-  busy: false,
+  refreshing: false,
+  busyNodes: new Set(),
 };
 
 const $ = (selector) => document.querySelector(selector);
 
-function shortHash(value, length = 12) {
-  return value ? `${value.slice(0, length)}…` : "—";
+$("#overview").after($("#chain"));
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 function number(value, maximumFractionDigits = 1) {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(value ?? 0);
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits }).format(
+    Number(value ?? 0),
+  );
 }
 
-function timeLabel(timestamp) {
-  return new Intl.DateTimeFormat("en-US", {
+function parameterCount(value) {
+  const parameters = Number(value ?? 0);
+  if (parameters >= 1e12) return `${number(parameters / 1e12, 2)}T`;
+  if (parameters >= 1e9) return `${number(parameters / 1e9, 2)}B`;
+  if (parameters >= 1e6) return `${number(parameters / 1e6, 0)}M`;
+  return number(parameters, 0);
+}
+
+function shortHash(value, length = 14) {
+  const text = String(value ?? "");
+  return text ? `${text.slice(0, length)}…` : "—";
+}
+
+function timeLabel(timestamp, includeDate = false) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "—";
+  const options = {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-  }).format(new Date(timestamp));
+    hour12: false,
+  };
+  if (includeDate) {
+    options.year = "numeric";
+    options.month = "2-digit";
+    options.day = "2-digit";
+  }
+  return new Intl.DateTimeFormat("en-CA", options).format(date);
+}
+
+function setText(selector, value) {
+  const element = $(selector);
+  if (element) element.textContent = value;
 }
 
 function toast(message, error = false) {
@@ -28,272 +64,277 @@ function toast(message, error = false) {
   element.classList.toggle("error", error);
   element.classList.add("visible");
   window.clearTimeout(toast.timeout);
-  toast.timeout = window.setTimeout(() => element.classList.remove("visible"), 3500);
+  toast.timeout = window.setTimeout(
+    () => element.classList.remove("visible"),
+    3200,
+  );
 }
 
-async function request(path, options) {
+async function request(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
   const body = await response.json();
-  if (!response.ok) throw new Error(body.message || body.error || "Request failed");
+  if (!response.ok) {
+    throw new Error(body.message || body.error || "Request failed");
+  }
   return body;
 }
 
-function renderMetrics(network) {
-  const { metrics, chain } = network;
-  $("#metric-memory").textContent = `${number(metrics.totalMemoryGiB, 0)} GiB`;
-  $("#metric-nodes").textContent = `${metrics.nodesOnline} / ${metrics.nodesTotal}`;
-  $("#metric-receipts").textContent = number(metrics.verifiedReceipts, 0);
-  $("#metric-height").textContent = `#${metrics.chainHeight}`;
-  $("#model-name").textContent = network.model.name;
-  $("#model-stages").textContent = `${network.model.shardCount} execution stages`;
-  $("#empty-stage-count").textContent = network.model.shardCount;
+function renderOverview(network) {
+  const { metrics } = network;
+  const { chain } = network;
+  const healthy = network.status === "healthy";
 
-  const networkPill = $(".network-pill");
-  networkPill.classList.toggle("degraded", network.status !== "healthy");
-  $("#network-label").textContent =
-    network.status === "healthy"
-      ? `${metrics.nodesOnline} nodes / live`
-      : `${metrics.nodesOnline} nodes / rerouting`;
-  $("#topology-status").textContent =
-    `${metrics.nodesOnline}/${metrics.nodesTotal} ONLINE`;
+  setText("#protocol-version", network.protocolVersion);
+  setText("#metric-consensus", "USEFUL WORK");
+  setText("#metric-chain-valid", chain.valid ? "VALID" : "INVALID");
+  setText("#metric-height", `#${metrics.chainHeight}`);
+  setText("#metric-supply", `${number(chain.token.totalSupply, 2)} CTX`);
+  setText(
+    "#metric-rewards",
+    `${number(chain.token.providerRewards, 3)} CTX`,
+  );
+  setText("#metric-burned", `${number(chain.token.totalBurned, 4)} CTX`);
+  setText("#metric-inferences", number(metrics.inferencesFinalized, 0));
+  setText("#metric-nodes", `${metrics.nodesOnline}/${metrics.nodesTotal}`);
 
-  $("#token-supply").textContent = number(chain.token.totalSupply, 2);
-  $("#token-burned").textContent = `${number(chain.token.totalBurned, 4)} CTX`;
-  $("#token-rewards").textContent = `${number(chain.token.providerRewards, 3)} CTX`;
-  $("#token-demo-balance").textContent = `${number(chain.demoWallet.balance, 2)} CTX`;
-  const valid = $("#chain-valid");
-  valid.textContent = chain.valid ? "✓ CHAIN VALID" : "CHAIN INVALID";
+  const chainStatus = $("#metric-chain-valid");
+  chainStatus.classList.toggle("good", chain.valid);
+  chainStatus.classList.toggle("warn", !chain.valid);
+
+  const connection = $("#connection");
+  connection.classList.toggle("degraded", !healthy);
+  connection.classList.remove("offline");
+  setText(
+    "#network-label",
+    healthy
+      ? `${metrics.nodesOnline} NODES / LIVE`
+      : `${metrics.nodesOnline} NODES / DEGRADED`,
+  );
 }
 
-function renderTopology(network) {
-  const container = $("#topology");
-  const nodes = network.nodes;
-  const width = 420;
-  const height = 318;
-  const centerX = width / 2;
-  const centerY = height / 2;
-  const radiusX = 166;
-  const radiusY = 118;
-  const positions = nodes.map((_, index) => {
-    const angle = (Math.PI * 2 * index) / nodes.length - Math.PI / 2;
-    return {
-      x: centerX + Math.cos(angle) * radiusX,
-      y: centerY + Math.sin(angle) * radiusY,
-    };
-  });
-
-  container.innerHTML = "";
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  positions.forEach(({ x, y }) => {
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    line.setAttribute("x1", centerX);
-    line.setAttribute("y1", centerY);
-    line.setAttribute("x2", x);
-    line.setAttribute("y2", y);
-    line.setAttribute("class", "topology-line");
-    svg.appendChild(line);
-  });
-  container.appendChild(svg);
-
-  const center = document.createElement("div");
-  center.className = "topology-center";
-  const parameterLabel =
-    network.model.parameters >= 1e9
-      ? `${number(network.model.parameters / 1e9, 2)}B`
-      : `${number(network.model.parameters / 1e6, 0)}M`;
-  center.innerHTML = `<span>${parameterLabel}</span><small>${network.model.shardCount} STAGES</small>`;
-  container.appendChild(center);
-
-  nodes.forEach((node, index) => {
-    const button = document.createElement("button");
-    button.className = `topology-node ${node.status === "offline" ? "offline" : ""}`;
-    button.style.left = `${(positions[index].x / width) * 100}%`;
-    button.style.top = `${(positions[index].y / height) * 100}%`;
-    button.style.setProperty("--node-color", node.accent);
-    button.textContent = node.name.slice(0, 2).toUpperCase();
-    button.title = `${node.name}: click to set ${node.status === "online" ? "offline" : "online"}`;
-    button.dataset.nodeToggle = node.id;
-    container.appendChild(button);
-  });
+function renderRuntime(network) {
+  const model = network.model;
+  const runtime = network.modelRuntime || {};
+  setText("#model-name", model.name);
+  setText("#model-id", model.id);
+  setText("#model-version", model.version);
+  setText("#model-precision", model.precision);
+  setText("#model-parameters", parameterCount(model.parameters));
+  setText("#model-context", number(model.contextWindow, 0));
+  setText("#model-stage-count", number(model.shardCount, 0));
+  setText("#runtime-engine", runtime.engine || model.architecture);
+  setText(
+    "#runtime-state",
+    runtime.active ? "ACTIVE" : runtime.available ? "READY" : "DETERMINISTIC",
+  );
 }
 
-function renderShards(network) {
-  $("#shard-strip").innerHTML = network.model.placements
-    .map(
-      (shard) => `
-        <div class="shard-cell">
-          <b>S${String(shard.index).padStart(2, "0")}</b>
-          <span>${shard.replicas.length}× REPLICA</span>
-        </div>
-      `,
-    )
-    .join("");
-}
-
-function renderNodes(network) {
-  $("#node-grid").innerHTML = network.nodes
-    .map(
-      (node) => `
-        <article class="node-card ${node.status === "offline" ? "offline" : ""}" style="--node-color:${node.accent}">
-          <div class="node-card-head">
-            <div class="node-name">
-              <span class="node-avatar">${node.name.slice(0, 2).toUpperCase()}</span>
-              <div><b>${node.name}</b><small>${node.operator} / ${node.region}</small></div>
-            </div>
-            <button class="node-toggle" data-node-toggle="${node.id}" aria-label="Set ${node.name} ${node.status === "online" ? "offline" : "online"}"></button>
-          </div>
-          <div class="node-stats">
-            <div><span>Memory</span><b>${number(node.allocatedMemoryGiB, 1)} / ${node.memoryGiB} GiB</b></div>
-            <div><span>Jobs</span><b>${node.completedJobs}</b></div>
-            <div><span>Earned</span><b>${number(node.balance, 3)} CTX</b></div>
-          </div>
-          <div class="node-shards">${node.shards.map((shard) => `<span>S${String(shard.index).padStart(2, "0")}</span>`).join("")}</div>
+function renderPlacements(network) {
+  const model = network.model;
+  setText(
+    "#model-placement-summary",
+    `${number(model.modelMemoryGiB, 2)} GiB MODEL / ` +
+      `${number(model.replicatedMemoryGiB, 2)} GiB PLACED`,
+  );
+  $("#model-placements").innerHTML = model.placements
+    .map((stage) => {
+      const layers = Array.isArray(stage.layerRange)
+        ? `${stage.layerRange[0]}–${stage.layerRange[1]}`
+        : "N/A";
+      const replicas = stage.replicas.length
+        ? stage.replicas.join(", ")
+        : "UNASSIGNED";
+      return `
+        <article class="stage-cell">
+          <header>
+            <b>STAGE ${String(stage.index).padStart(2, "0")}</b>
+            <span>${stage.replicas.length}×</span>
+          </header>
+          <dl>
+            <div><dt>SIZE</dt><dd>${number(stage.sizeGiB, 2)} GiB</dd></div>
+            <div><dt>LAYERS</dt><dd>${escapeHtml(layers)}</dd></div>
+            <div><dt>WORK</dt><dd>${number(stage.computeUnits, 0)} units</dd></div>
+            <div><dt>HOSTS</dt><dd class="replica-list" title="${escapeHtml(replicas)}">${escapeHtml(replicas)}</dd></div>
+          </dl>
         </article>
-      `,
-    )
+      `;
+    })
     .join("");
+}
+
+function roleLabel(role) {
+  return String(role || "provider").replaceAll("-", " ").toUpperCase();
+}
+
+function renderProviders(network) {
+  $("#provider-rows").innerHTML = network.nodes
+    .map((node) => {
+      const stages = node.shards.length
+        ? node.shards
+            .map((stage) => String(stage.index).padStart(2, "0"))
+            .join(",")
+        : "—";
+      const canControl = !node.remote;
+      const nextStatus = node.status === "online" ? "offline" : "online";
+      const control = canControl
+        ? `<button type="button" data-node-toggle="${escapeHtml(node.id)}" ${
+            state.busyNodes.has(node.id) ? "disabled" : ""
+          }>${nextStatus === "online" ? "SET ONLINE" : "SET OFFLINE"}</button>`
+        : "LEASED";
+      return `
+        <tr>
+          <td><span class="state-label ${escapeHtml(node.status)}">${escapeHtml(node.status.toUpperCase())}</span></td>
+          <td>
+            <span class="node-id">${escapeHtml(node.name)} / ${escapeHtml(node.id)}</span>
+            <span class="node-operator">${escapeHtml(node.operator)}</span>
+          </td>
+          <td><span class="role">${escapeHtml(roleLabel(node.role))}</span></td>
+          <td>${escapeHtml(node.region)}</td>
+          <td>${number(node.allocatedMemoryGiB, 2)} / ${number(node.memoryGiB, 1)} GiB</td>
+          <td><span class="stage-list" title="${escapeHtml(stages)}">${escapeHtml(stages)}</span></td>
+          <td>${number(node.networkLatencyMs, 0)} ms</td>
+          <td>${number(node.completedJobs, 0)}</td>
+          <td>${number(node.balance, 4)} CTX</td>
+          <td>${control}</td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function renderAccounting(network) {
+  const chain = network.chain;
+  const epoch = chain.economics.currentEpoch;
+  setText("#token-supply", `${number(chain.token.totalSupply, 4)} CTX`);
+  setText("#token-max-supply", `${number(chain.token.maxSupply, 0)} CTX`);
+  setText(
+    "#token-rewards",
+    `${number(chain.token.providerRewards, 4)} CTX`,
+  );
+  setText("#token-burned", `${number(chain.token.totalBurned, 4)} CTX`);
+  setText("#token-epoch", `#${epoch.index}`);
+  setText("#token-epoch-fees", `${number(epoch.fees, 4)} CTX`);
+  setText("#token-epoch-issuance", `${number(epoch.issuance, 4)} CTX`);
+  setText(
+    "#token-epoch-budget",
+    `${number(epoch.remainingBudget, 4)} CTX`,
+  );
+  setText("#chain-valid", chain.valid ? "VALID" : "INVALID");
+  $("#chain-valid").classList.toggle("state-label", chain.valid);
 }
 
 function renderBlocks(network) {
-  $("#block-list").innerHTML = network.chain.recentBlocks
-    .slice(0, 6)
-    .map(
-      (block) => `
-        <div class="block-row">
-          <span class="block-height">#${block.height}</span>
-          <span class="block-hash">${block.hash}</span>
-          <span class="block-kind">${block.kind === "inference" ? "useful work" : block.kind}</span>
-          <span class="block-time">${timeLabel(block.timestamp)}</span>
-        </div>
-      `,
-    )
-    .join("");
+  const blocks = network.chain.recentBlocks || [];
+  $("#block-rows").innerHTML = blocks.length
+    ? blocks
+        .slice(0, 10)
+        .map(
+          (block) => `
+            <tr>
+              <td>#${number(block.height, 0)}</td>
+              <td>${escapeHtml(block.kind.toUpperCase())}</td>
+              <td class="block-hash" title="${escapeHtml(block.hash)}">${escapeHtml(shortHash(block.hash, 20))}</td>
+              <td>${escapeHtml(timeLabel(block.timestamp))}</td>
+            </tr>
+          `,
+        )
+        .join("")
+    : '<tr><td colspan="4" class="loading-row">NO BLOCKS</td></tr>';
+}
+
+function renderEvents(network) {
+  const events = network.recentEvents || [];
+  $("#event-log").innerHTML = events.length
+    ? events
+        .slice(0, 12)
+        .map(
+          (event) => `
+            <li>
+              <time datetime="${escapeHtml(event.timestamp)}">${escapeHtml(timeLabel(event.timestamp))}</time>
+              <span class="event-kind ${escapeHtml(event.type)}">${escapeHtml(event.type)}</span>
+              <strong>${escapeHtml(event.title)}</strong>
+              <span class="event-detail">${escapeHtml(event.detail)}</span>
+            </li>
+          `,
+        )
+        .join("")
+    : '<li class="loading-row">NO EVENTS</li>';
 }
 
 function renderNetwork(network) {
   state.network = network;
-  renderMetrics(network);
-  renderTopology(network);
-  renderShards(network);
-  renderNodes(network);
+  renderOverview(network);
+  renderRuntime(network);
+  renderPlacements(network);
+  renderProviders(network);
+  renderAccounting(network);
   renderBlocks(network);
+  renderEvents(network);
+  setText("#last-updated", timeLabel(new Date().toISOString(), true));
 }
 
 async function refresh() {
+  if (state.refreshing) return;
+  state.refreshing = true;
+  $("#refresh-network").disabled = true;
   try {
     renderNetwork(await request("/api/network"));
   } catch (error) {
-    $("#network-label").textContent = "Coordinator offline";
-    toast(error.message, true);
-  }
-}
-
-function renderResult(result) {
-  state.lastProof = result.proof;
-  $("#result-empty").classList.add("hidden");
-  $("#result-content").classList.remove("hidden");
-  $("#result-height").textContent = `#${result.block.height}`;
-  $("#result-text").textContent = result.output.text;
-  $("#result-block-hash").textContent = shortHash(result.block.hash, 18);
-  $("#result-block-hash").title = result.block.hash;
-  $("#result-proof-root").textContent = shortHash(result.proof.root, 18);
-  $("#result-proof-root").title = result.proof.root;
-  $("#result-kernel-time").textContent = `${number(result.performance.kernelMicros / 1000, 2)} ms`;
-  $("#result-reward").textContent = `${number(result.accounting.providerRewards, 3)} CTX`;
-
-  const accents = new Map(state.network.nodes.map((node) => [node.id, node.accent]));
-  $("#route-track").innerHTML = result.route
-    .map(
-      (stage) => `
-        <div class="route-stage" style="--stage-color:${accents.get(stage.nodeId) || "#7187ed"}" title="${stage.nodeName} / ${stage.region} / ${stage.kernelMicros} μs">
-          <b>S${String(stage.stage).padStart(2, "0")}</b>
-          <span>${stage.nodeName}</span>
-        </div>
-      `,
-    )
-    .join("");
-  $("#route-track").style.gridTemplateColumns =
-    `repeat(${Math.min(result.route.length, 12)}, 1fr)`;
-  $("#result-panel").scrollIntoView({ behavior: "smooth", block: "center" });
-}
-
-async function runInference() {
-  if (state.busy) return;
-  const prompt = $("#prompt").value.trim();
-  if (prompt.length < 2) {
-    toast("Enter a prompt first.", true);
-    return;
-  }
-  state.busy = true;
-  const button = $("#run-inference");
-  button.disabled = true;
-  button.classList.add("loading");
-  try {
-    const result = await request("/api/inference", {
-      method: "POST",
-      body: JSON.stringify({ modelId: state.network.model.id, prompt }),
-    });
-    renderResult(result);
-    toast(`Block #${result.block.height} finalized from 12 signed receipts.`);
-    await refresh();
-  } catch (error) {
+    const connection = $("#connection");
+    connection.classList.remove("degraded");
+    connection.classList.add("offline");
+    setText("#network-label", "COORDINATOR OFFLINE");
     toast(error.message, true);
   } finally {
-    state.busy = false;
-    button.disabled = false;
-    button.classList.remove("loading");
+    state.refreshing = false;
+    $("#refresh-network").disabled = false;
   }
 }
 
 async function toggleNode(nodeId) {
+  if (!state.network || state.busyNodes.has(nodeId)) return;
   const node = state.network.nodes.find((candidate) => candidate.id === nodeId);
-  if (!node || state.busy) return;
+  if (!node || node.remote) return;
   const status = node.status === "online" ? "offline" : "online";
+  state.busyNodes.add(nodeId);
+  renderProviders(state.network);
   try {
-    await request(`/api/nodes/${nodeId}/status`, {
+    await request(`/api/nodes/${encodeURIComponent(nodeId)}/status`, {
       method: "POST",
       body: JSON.stringify({ status }),
     });
-    toast(`${node.name} is ${status}. Replica routing updated.`);
+    toast(`${node.id}: ${status.toUpperCase()}`);
     await refresh();
   } catch (error) {
     toast(error.message, true);
+  } finally {
+    state.busyNodes.delete(nodeId);
+    if (state.network) renderProviders(state.network);
   }
 }
 
-async function verifyLastProof() {
-  if (!state.lastProof) return;
+async function copyCommand(targetId) {
+  const target = document.getElementById(targetId);
+  if (!target) return;
   try {
-    const result = await request("/api/proofs/verify", {
-      method: "POST",
-      body: JSON.stringify({ proof: state.lastProof }),
-    });
-    toast(
-      result.valid
-        ? `${result.receiptCount} signatures, activation links, and Merkle root verified.`
-        : "Proof verification failed.",
-      !result.valid,
-    );
-  } catch (error) {
-    toast(error.message, true);
+    await navigator.clipboard.writeText(target.textContent.trim());
+    toast("COMMAND COPIED");
+  } catch {
+    toast("CLIPBOARD ACCESS UNAVAILABLE", true);
   }
 }
 
 document.addEventListener("click", (event) => {
-  const promptButton = event.target.closest("[data-prompt]");
-  if (promptButton) $("#prompt").value = promptButton.dataset.prompt;
   const nodeButton = event.target.closest("[data-node-toggle]");
   if (nodeButton) toggleNode(nodeButton.dataset.nodeToggle);
+  const copyButton = event.target.closest("[data-copy-target]");
+  if (copyButton) copyCommand(copyButton.dataset.copyTarget);
 });
 
-$("#run-inference").addEventListener("click", runInference);
-$("#verify-proof").addEventListener("click", verifyLastProof);
+$("#refresh-network").addEventListener("click", refresh);
 
 refresh();
-window.setInterval(() => {
-  if (!state.busy) refresh();
-}, 8_000);
+window.setInterval(refresh, 8_000);

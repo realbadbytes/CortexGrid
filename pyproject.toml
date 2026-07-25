@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cortex-grid"
+version = "0.1.0"
+description = "Distributed AI hosting with proof-of-useful-inference settlement"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=38"]
+
+[tool.setuptools]
+packages = ["cortexgrid"]
+
+[tool.setuptools.package-dir]
+cortexgrid = "control/cortexgrid"

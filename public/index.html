@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="CortexGrid: distributed AI execution secured by proof of useful inference."
+    />
+    <title>CortexGrid — Distributed intelligence</title>
+    <link rel="icon" href="/mark.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
+    <nav class="nav shell">
+      <a class="brand" href="#" aria-label="CortexGrid home">
+        <span class="brand-mark" aria-hidden="true">
+          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+        </span>
+        <span>CORTEX<span class="brand-slash">/</span>GRID</span>
+      </a>
+      <div class="nav-links">
+        <a href="#inference">Inference</a>
+        <a href="#chain">Chain</a>
+        <a href="#network">Nodes</a>
+        <a href="/api/openapi.json">API</a>
+      </div>
+      <div class="network-pill">
+        <span class="pulse"></span>
+        <span id="network-label">Connecting</span>
+      </div>
+    </nav>
+
+    <main>
+      <header class="hero shell">
+        <div class="eyebrow"><span>DEVNET 01</span> / PROOF OF USEFUL INFERENCE</div>
+        <h1>The model doesn’t<br />have to fit <em>anywhere.</em></h1>
+        <p class="hero-copy">
+          CortexGrid turns idle memory and compute into one inference fabric.
+          Model shards live across independent nodes. Verified work earns CTX.
+        </p>
+        <div class="hero-actions">
+          <a class="primary-button" href="#inference">
+            Run the network
+            <span aria-hidden="true">↗</span>
+          </a>
+          <a class="text-link" href="#architecture">See how it works <span>↓</span></a>
+        </div>
+        <div class="hero-metrics" aria-label="Network metrics">
+          <div>
+            <span class="metric-value" id="metric-memory">—</span>
+            <span class="metric-label">Logical RAM</span>
+          </div>
+          <div>
+            <span class="metric-value" id="metric-nodes">—</span>
+            <span class="metric-label">Native nodes</span>
+          </div>
+          <div>
+            <span class="metric-value" id="metric-receipts">—</span>
+            <span class="metric-label">Proof receipts</span>
+          </div>
+          <div>
+            <span class="metric-value mono" id="metric-height">—</span>
+            <span class="metric-label">Chain height</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="workbench shell" id="inference">
+        <div class="section-heading">
+          <div>
+            <span class="section-index">01 / INFERENCE</span>
+            <h2>Put the network to work.</h2>
+          </div>
+          <div class="model-badge">
+            <span class="model-dot"></span>
+            <span id="model-name">Cortex 72B · Devnet</span>
+            <small id="model-stages">Loading stages</small>
+          </div>
+        </div>
+
+        <div class="workbench-grid">
+          <div class="prompt-card panel">
+            <div class="panel-topline">
+              <span>PROMPT</span>
+              <span class="mono">1.00 CTX / REQUEST</span>
+            </div>
+            <textarea
+              id="prompt"
+              maxlength="8000"
+              aria-label="Inference prompt"
+              placeholder="Ask the distributed model anything…"
+            >Explain how a model can be larger than any single participant's RAM.</textarea>
+            <div class="prompt-suggestions">
+              <button data-prompt="Explain how useful inference creates demand for the network token.">Token utility</button>
+              <button data-prompt="How does CortexGrid recover when a model shard node goes offline?">Node failure</button>
+              <button data-prompt="What limits the scale of a distributed trillion-parameter model?">Scale limits</button>
+            </div>
+            <div class="prompt-footer">
+              <div class="prompt-meta">
+                <span><b>MODE</b> PIPELINE</span>
+                <span><b>PROOF</b> ED25519</span>
+                <span><b>SETTLE</b> ON-CHAIN</span>
+              </div>
+              <button class="run-button" id="run-inference">
+                <span class="run-idle">Execute inference</span>
+                <span class="run-active">Routing shards <i></i></span>
+              </button>
+            </div>
+          </div>
+
+          <div class="topology-card panel">
+            <div class="panel-topline">
+              <span>LIVE TOPOLOGY</span>
+              <span id="topology-status">—</span>
+            </div>
+            <div class="topology" id="topology" aria-label="Network topology"></div>
+            <div class="topology-legend">
+              <span><i class="legend-online"></i> Online</span>
+              <span><i class="legend-offline"></i> Offline</span>
+              <span>Click a node to test failover</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="result-panel panel" id="result-panel">
+          <div class="result-empty" id="result-empty">
+            <div class="empty-orbit"><span id="empty-stage-count">—</span></div>
+            <div>
+              <strong>No inference finalized yet</strong>
+              <p>A route, proof bundle, and CTX block will appear here.</p>
+            </div>
+          </div>
+          <div class="result-content hidden" id="result-content">
+            <div class="result-header">
+              <div>
+                <span class="verified-badge">✓ FINALIZED</span>
+                <h3>Useful work became block <span id="result-height">#—</span></h3>
+              </div>
+              <button class="verify-button" id="verify-proof">Verify proof locally</button>
+            </div>
+            <div class="route-track" id="route-track"></div>
+            <div class="result-body">
+              <div class="completion">
+                <span class="result-label">MODEL OUTPUT / DISTRIBUTED RUNTIME</span>
+                <p id="result-text"></p>
+              </div>
+              <dl class="proof-facts">
+                <div><dt>Block hash</dt><dd class="mono" id="result-block-hash">—</dd></div>
+                <div><dt>Proof root</dt><dd class="mono" id="result-proof-root">—</dd></div>
+                <div><dt>Kernel time</dt><dd id="result-kernel-time">—</dd></div>
+                <div><dt>Provider reward</dt><dd id="result-reward">—</dd></div>
+              </dl>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="chain-section" id="chain">
+        <div class="shell">
+          <div class="section-heading light-heading">
+            <div>
+              <span class="section-index">02 / NATIVE TOKEN</span>
+              <h2>Compute is the block reward.</h2>
+            </div>
+            <p>
+              CTX issuance requires a complete, signed inference route.
+              Transfers cannot mint supply.
+            </p>
+          </div>
+
+          <div class="chain-grid">
+            <div class="economy-card dark-card">
+              <div class="card-kicker">CTX ECONOMY</div>
+              <div class="supply-row">
+                <div>
+                  <strong id="token-supply">—</strong>
+                  <span>circulating supply</span>
+                </div>
+                <div class="token-symbol">CTX</div>
+              </div>
+              <div class="fee-labels">
+                <span>Per inference fee</span>
+                <b>1.00 CTX</b>
+              </div>
+              <div class="fee-bar">
+                <i class="fee-provider" style="width: 80%"></i>
+                <i class="fee-protocol" style="width: 12%"></i>
+                <i class="fee-burn" style="width: 8%"></i>
+              </div>
+              <div class="fee-legend">
+                <span><i class="provider-dot"></i><b>80%</b> Providers</span>
+                <span><i class="protocol-dot"></i><b>12%</b> Protocol</span>
+                <span><i class="burn-dot"></i><b>8%</b> Burned</span>
+              </div>
+              <div class="economy-stats">
+                <div><span>Burned</span><b id="token-burned">—</b></div>
+                <div><span>Worker rewards</span><b id="token-rewards">—</b></div>
+                <div><span>Demo balance</span><b id="token-demo-balance">—</b></div>
+              </div>
+            </div>
+
+            <div class="blocks-card dark-card">
+              <div class="card-title-row">
+                <div>
+                  <span class="card-kicker">CANONICAL CHAIN</span>
+                  <h3>Latest blocks</h3>
+                </div>
+                <span class="chain-valid" id="chain-valid">VERIFYING</span>
+              </div>
+              <div class="block-list" id="block-list"></div>
+            </div>
+          </div>
+
+          <p class="market-note">
+            CTX is an experimental devnet utility token—not an investment product.
+            Network utility can support demand; no protocol can guarantee market value.
+          </p>
+        </div>
+      </section>
+
+      <section class="nodes-section shell" id="network">
+        <div class="section-heading">
+          <div>
+            <span class="section-index">03 / MEMORY PROVIDERS</span>
+            <h2>One model, held by many.</h2>
+          </div>
+          <p>Each shard has two replicas. Take a node offline and the next inference reroutes.</p>
+        </div>
+        <div class="shard-strip" id="shard-strip"></div>
+        <div class="node-grid" id="node-grid"></div>
+      </section>
+
+      <section class="architecture shell" id="architecture">
+        <div class="section-heading">
+          <div>
+            <span class="section-index">04 / ARCHITECTURE</span>
+            <h2>Three pieces. One clear path.</h2>
+          </div>
+        </div>
+        <div class="architecture-flow">
+          <article>
+            <span class="architecture-number">01</span>
+            <div class="architecture-icon python-icon">PY</div>
+            <h3>Control plane</h3>
+            <p>One Python process places shards, selects replicas, verifies signatures, and exposes the API.</p>
+            <code>control/cortexgrid</code>
+          </article>
+          <div class="flow-arrow">→</div>
+          <article>
+            <span class="architecture-number">02</span>
+            <div class="architecture-icon native-icon">C++</div>
+            <h3>Execution plane</h3>
+            <p>Persistent native workers host model tensors. llama.cpp selects CPU or CUDA and moves activations across the private route.</p>
+            <code>native/cortex_worker</code>
+          </article>
+          <div class="flow-arrow">→</div>
+          <article>
+            <span class="architecture-number">03</span>
+            <div class="architecture-icon chain-icon">#</div>
+            <h3>Native chain</h3>
+            <p>Signed receipts form a Merkle proof. The proof finalizes fees, burns, rewards, and issuance.</p>
+            <code>.data/chain.jsonl</code>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="shell footer-inner">
+        <div class="brand footer-brand">
+          <span class="brand-mark" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </span>
+          <span>CORTEX<span class="brand-slash">/</span>GRID</span>
+        </div>
+        <p>Distributed intelligence, verifiable by default.</p>
+        <span class="mono">DEVNET / v0.1.0</span>
+      </div>
+    </footer>
+
+    <div class="toast" id="toast" role="status"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

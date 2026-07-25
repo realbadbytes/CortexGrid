@@ -10,6 +10,7 @@ from cortexgrid.terminal import CortexSession
 class FakeApi:
     def __init__(self) -> None:
         self.prompts: list[str] = []
+        self.participations: list[dict] = []
 
     def network(self) -> dict:
         return {
@@ -28,8 +29,14 @@ class FakeApi:
             },
         }
 
-    def infer(self, prompt: str, model_id: str | None = None) -> dict:
+    def infer(
+        self,
+        prompt: str,
+        model_id: str | None,
+        participation: dict,
+    ) -> dict:
         self.prompts.append(prompt)
+        self.participations.append(participation)
         return {
             "id": f"inf_{len(self.prompts)}",
             "output": {"text": f"answer {len(self.prompts)}"},
@@ -50,9 +57,18 @@ class FakeApi:
 
 
 class CortexTerminalTests(unittest.TestCase):
+    @staticmethod
+    def signer(prompt: str, model_id: str | None) -> dict:
+        return {
+            "request": {"prompt": prompt, "modelId": model_id},
+            "signature": "test-signature",
+        }
+
     def test_conversation_context_and_sponsored_result(self) -> None:
         api = FakeApi()
-        session = CortexSession(api, color=False)
+        session = CortexSession(
+            api, color=False, participation_signer=self.signer
+        )
 
         first = session.ask("Hello")
         second = session.ask("What did I say?")
@@ -62,11 +78,16 @@ class CortexTerminalTests(unittest.TestCase):
         self.assertIn("User: Hello", api.prompts[1])
         self.assertIn("Assistant: answer 1", api.prompts[1])
         self.assertTrue(api.prompts[1].endswith("Assistant:"))
+        self.assertEqual(
+            api.participations[1]["request"]["prompt"], api.prompts[1]
+        )
         self.assertEqual(second["output"]["text"], "answer 2")
 
     def test_terminal_prints_route_block_and_provider_reward(self) -> None:
         api = FakeApi()
-        session = CortexSession(api, color=False)
+        session = CortexSession(
+            api, color=False, participation_signer=self.signer
+        )
         result = session.ask("Test")
         output = io.StringIO()
 
@@ -77,7 +98,11 @@ class CortexTerminalTests(unittest.TestCase):
         self.assertIn("Atlas[0] → Ember[1]", rendered)
         self.assertIn("block  #5", rendered)
         self.assertIn("1.0 CTX to compute providers", rendered)
-        self.assertIn("end user paid 0 CTX", rendered)
+        self.assertIn("requester paid 0 CTX", rendered)
+
+    def test_inference_requires_compute_participation(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "compute participant"):
+            CortexSession(FakeApi(), color=False).ask("Test")
 
     def test_status_uses_live_network_snapshot(self) -> None:
         output = io.StringIO()

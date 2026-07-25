@@ -18,6 +18,7 @@ READY_DOMAIN = "cortex-node-ready-v1"
 HEARTBEAT_DOMAIN = "cortex-node-heartbeat-v1"
 LEAVE_DOMAIN = "cortex-node-leave-v1"
 WORK_TICKET_DOMAIN = "cortex-work-ticket-v1"
+INFERENCE_ACCESS_DOMAIN = "cortex-inference-access-v1"
 MAX_CLOCK_SKEW_MS = 5 * 60 * 1_000
 
 

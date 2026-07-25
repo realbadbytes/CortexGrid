@@ -75,6 +75,12 @@ class RemoteJoinTests(unittest.TestCase):
                 self.assertEqual(
                     network.node_snapshot("provider-one")["status"], "online"
                 )
+                self.assertEqual(
+                    network.node_snapshot("provider-one")["role"],
+                    "dedicated-worker",
+                )
+                with self.assertRaisesRegex(RuntimeError, "cannot request"):
+                    provider.authorize_inference("not an interactive node")
                 with self.assertRaises(ValueError):
                     network.set_node_status("provider-one", "online")
 

@@ -7,6 +7,7 @@ import secrets
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -22,6 +23,7 @@ from .executor import NativeWorker
 from .join_protocol import (
     ASSIGNMENT_DOMAIN,
     HEARTBEAT_DOMAIN,
+    INFERENCE_ACCESS_DOMAIN,
     JOIN_PROTOCOL,
     LEAVE_DOMAIN,
     READY_DOMAIN,
@@ -33,7 +35,7 @@ from .join_protocol import (
     sign_payload,
     verify_payload,
 )
-from .util import canonical_json, utc_now
+from .util import canonical_json, sha256, utc_now
 from .wallet import Wallet, address_from_public_key
 
 
@@ -64,7 +66,12 @@ class ProviderNode:
         heartbeat_seconds: float = 10,
         coordinator_public_key: str | None = None,
         price_micro_per_work_unit: int = DEFAULT_PRICE_MICRO_PER_WORK_UNIT,
+        role: str = "dedicated-worker",
     ):
+        if role not in {"interactive-user", "dedicated-worker"}:
+            raise ValueError(
+                "provider role must be interactive-user or dedicated-worker"
+            )
         self.coordinator_url = coordinator_url.rstrip("/")
         self.node_id = node_id
         self.name = name
@@ -80,6 +87,7 @@ class ProviderNode:
         self.api_port = api_port
         self.rpc_port = rpc_port
         self.heartbeat_seconds = heartbeat_seconds
+        self.role = role
         self.price_micro_per_work_unit = validate_price(
             price_micro_per_work_unit
         )
@@ -229,6 +237,7 @@ class ProviderNode:
             "name": self.name,
             "operator": self.operator,
             "region": self.region,
+            "role": self.role,
             "memoryGiB": self.memory_gib,
             "networkLatencyMs": self.network_latency_ms,
             "priceMicroPerWorkUnit": self.price_micro_per_work_unit,
@@ -269,6 +278,7 @@ class ProviderNode:
         if (
             assignment["nodeId"] != self.node_id
             or assignment["publicKey"] != self.worker.public_key
+            or assignment["role"] != self.role
             or assignment["rewardAddress"] != self.reward_address
             or assignment["runtime"]["rpcEndpoint"] != self.rpc_endpoint
             or assignment["economics"]["priceMicroPerWorkUnit"]
@@ -314,6 +324,34 @@ class ProviderNode:
         self.last_error = None
         return result
 
+    def authorize_inference(
+        self, prompt: str, model_id: str | None = None
+    ) -> dict:
+        """Sign one inference request while this interactive node is online."""
+        if self.role != "interactive-user":
+            raise RuntimeError(
+                "dedicated workers provide compute but cannot request inference"
+            )
+        if not self.joined or self.assignment is None:
+            raise RuntimeError(
+                "CortexTerm must be online as a compute participant"
+            )
+        request = {
+            "protocol": JOIN_PROTOCOL,
+            "nodeId": self.node_id,
+            "assignmentId": self.assignment["assignmentId"],
+            "modelId": model_id or self.assignment["model"]["id"],
+            "promptDigest": sha256(prompt.strip()),
+            "timestampMs": now_ms(),
+            "nonce": secrets.token_hex(16),
+        }
+        return {
+            "request": request,
+            "signature": sign_payload(
+                self.wallet, INFERENCE_ACCESS_DOMAIN, request
+            ),
+        }
+
     def heartbeat(self) -> dict:
         if self.assignment is None:
             raise RuntimeError("provider has no model assignment")
@@ -347,13 +385,16 @@ class ProviderNode:
                 self.heartbeat()
             except (KeyError, TypeError, ValueError, RuntimeError) as error:
                 self.last_error = str(error)
-                print(f"[heartbeat] {error}")
+                print(f"[heartbeat] {error}", file=sys.stderr)
                 try:
                     self.join_network()
-                    print("[heartbeat] provider re-registered")
+                    print("[heartbeat] provider re-registered", file=sys.stderr)
                 except (KeyError, TypeError, ValueError, RuntimeError) as join_error:
                     self.last_error = str(join_error)
-                    print(f"[heartbeat] re-registration failed: {join_error}")
+                    print(
+                        f"[heartbeat] re-registration failed: {join_error}",
+                        file=sys.stderr,
+                    )
 
     def leave_network(self) -> dict:
         if self.assignment is None:
@@ -567,6 +608,7 @@ class ProviderNode:
             "name": self.name,
             "operator": self.operator,
             "region": self.region,
+            "role": self.role,
             "joined": self.joined,
             "publicKey": self.worker.public_key,
             "rewardAddress": self.reward_address,
@@ -617,7 +659,10 @@ class ProviderApiHandler(BaseHTTPRequestHandler):
     server: "ProviderHttpServer"
 
     def log_message(self, format: str, *args: object) -> None:
-        print(f"[provider] {self.address_string()} {format % args}")
+        print(
+            f"[provider] {self.address_string()} {format % args}",
+            file=sys.stderr,
+        )
 
     def _json(self, status: int, body: object) -> None:
         encoded = canonical_json(body).encode("utf-8")

@@ -63,6 +63,7 @@ def format_status(status: dict) -> str:
     rpc_state = "online" if status.get("rpcOnline") else "offline"
     return (
         f"{status['name']} ({status['nodeId']}) · {state}\n"
+        f"Role: {status.get('role', 'dedicated-worker')} · "
         f"Operator: {status['operator']} · Region: {status['region']}\n"
         f"RPC: {rpc_state} at {status['rpcEndpoint']}\n"
         f"Model: {model.get('name', 'unassigned')} "

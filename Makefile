@@ -20,6 +20,10 @@ ADVERTISE_HOST ?= 127.0.0.1
 PROVIDER_API_PORT ?= 51800
 PROVIDER_RPC_PORT ?= 50052
 PROVIDER_PRICE_MICRO ?= 10
+TERM_NODE_ID ?=
+TERM_MEMORY_GIB ?=
+TERM_API_PORT ?= 0
+TERM_RPC_PORT ?= 0
 
 build:
 	cmake -S native -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(CMAKE_BUILD_TYPE)
@@ -62,8 +66,8 @@ run-real: build build-model-runtime
 join: build build-provider-runtime
 	PYTHONPATH=control python3 -m cortexgrid.node_daemon --coordinator $(COORDINATOR_URL) $(if $(COORDINATOR_PUBLIC_KEY),--coordinator-public-key $(COORDINATOR_PUBLIC_KEY),) --node-id $(NODE_ID) --name "$(NODE_NAME)" --operator "$(OPERATOR)" --region $(REGION) --memory-gib $(MEMORY_GIB) --price-micro-per-work-unit $(PROVIDER_PRICE_MICRO) --advertise-host $(ADVERTISE_HOST) --api-port $(PROVIDER_API_PORT) --rpc-port $(PROVIDER_RPC_PORT) --executor $(CURDIR)/$(BUILD_DIR)/cortex_worker --rpc-binary $(CURDIR)/$(LLAMA_BUILD_DIR)/bin/ggml-rpc-server
 
-term:
-	PYTHONPATH=control python3 -m cortexgrid.terminal --server $(COORDINATOR_URL)
+term: build build-provider-runtime
+	PYTHONPATH=control python3 -m cortexgrid.terminal --server $(COORDINATOR_URL) $(if $(COORDINATOR_PUBLIC_KEY),--coordinator-public-key $(COORDINATOR_PUBLIC_KEY),) $(if $(TERM_NODE_ID),--node-id $(TERM_NODE_ID),) $(if $(TERM_MEMORY_GIB),--memory-gib $(TERM_MEMORY_GIB),) --operator "$(OPERATOR)" --region $(REGION) --advertise-host $(ADVERTISE_HOST) --provider-api-port $(TERM_API_PORT) --provider-rpc-port $(TERM_RPC_PORT) --executor $(CURDIR)/$(BUILD_DIR)/cortex_worker --rpc-binary $(CURDIR)/$(LLAMA_BUILD_DIR)/bin/ggml-rpc-server
 
 node:
 	PYTHONPATH=control python3 -m cortexgrid.provider_cli status --node-id $(NODE_ID) --api http://127.0.0.1:$(PROVIDER_API_PORT)

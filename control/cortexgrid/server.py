@@ -132,8 +132,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             body = self._body()
             if path == "/api/inference":
-                result = network.run_inference(
-                    body.get("prompt", ""), body.get("modelId")
+                result = network.run_participating_inference(
+                    body.get("prompt", ""),
+                    body.get("modelId"),
+                    body.get("participation"),
                 )
                 self._json(201, result)
             elif path == "/api/proofs/verify":
@@ -196,8 +198,9 @@ def openapi_document(port: int) -> dict:
             "title": "CortexGrid API",
             "version": "0.1.0",
             "description": (
-                "Python control plane for native distributed execution and the "
-                "proof-of-useful-inference CTX chain."
+                "Pool member compute to make otherwise unaffordable language "
+                "models available to every participating member, with native "
+                "execution and proof-of-useful-inference CTX settlement."
             ),
         },
         "servers": [{"url": f"http://localhost:{port}"}],
@@ -212,7 +215,10 @@ def openapi_document(port: int) -> dict:
             },
             "/api/inference": {
                 "post": {
-                    "summary": "Execute inference and finalize its useful-work block"
+                    "summary": (
+                        "Execute inference for an online CortexTerm compute "
+                        "participant and finalize its useful-work block"
+                    )
                 }
             },
             "/api/proofs/verify": {

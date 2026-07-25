@@ -7,6 +7,7 @@ import secrets
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -28,6 +29,7 @@ from .executor import ExecutionReceipt, NativeWorker, verify_receipt_signature
 from .join_protocol import (
     ASSIGNMENT_DOMAIN,
     HEARTBEAT_DOMAIN,
+    INFERENCE_ACCESS_DOMAIN,
     JOIN_PROTOCOL,
     LEAVE_DOMAIN,
     READY_DOMAIN,
@@ -129,6 +131,7 @@ class ComputeNode:
     network_latency_ms: int
     accent: str
     worker: NativeWorker | RemoteWorker
+    role: str = "built-in"
     price_micro_per_work_unit: int = DEFAULT_PRICE_MICRO_PER_WORK_UNIT
     status: str = "online"
     completed_jobs: int = 0
@@ -155,6 +158,7 @@ class ComputeNode:
             "id": self.id,
             "name": self.name,
             "operator": self.operator,
+            "role": self.role,
             "region": self.region,
             "status": self.status,
             "memoryGiB": self.memory_gib,
@@ -267,6 +271,8 @@ class CortexNetwork:
         self.recent_inferences: list[dict] = []
         self._lock = threading.RLock()
         self._closed = False
+        self._used_inference_nonces: set[str] = set()
+        self._inference_nonce_order: deque[str] = deque()
 
         try:
             self._start_nodes()
@@ -535,6 +541,11 @@ class CortexNetwork:
         name = self._bounded_text(registration.get("name"), "name")
         operator = self._bounded_text(registration.get("operator"), "operator")
         region = self._bounded_text(registration.get("region"), "region")
+        role = registration.get("role", "dedicated-worker")
+        if role not in {"interactive-user", "dedicated-worker"}:
+            raise ValueError(
+                "provider role must be interactive-user or dedicated-worker"
+            )
         public_key = self._validate_public_key(registration.get("publicKey"))
         rpc_host, rpc_port, rpc_endpoint = self._parse_rpc_endpoint(
             registration.get("rpcEndpoint")
@@ -625,6 +636,7 @@ class CortexNetwork:
                 "issuedAt": utc_now(),
                 "nodeId": node_id,
                 "publicKey": public_key,
+                "role": role,
                 "rewardAddress": address_from_public_key(public_key),
                 "model": {
                     "id": self.model["id"],
@@ -683,6 +695,7 @@ class CortexNetwork:
                 network_latency_ms=measured_latency_ms,
                 accent="#4dd4ac",
                 worker=worker,
+                role=role,
                 price_micro_per_work_unit=price_micro_per_work_unit,
                 status="assigned",
                 completed_jobs=existing.completed_jobs if existing else 0,
@@ -702,7 +715,7 @@ class CortexNetwork:
             self._event(
                 "node",
                 f"{name} registered",
-                f"{region} · assigned model stage {shard['index']}",
+                f"{region} · {role} · assigned model stage {shard['index']}",
                 nodeId=node_id,
             )
             return {
@@ -1052,6 +1065,92 @@ class CortexNetwork:
         )
         return min(ready, target), target
 
+    def _authorize_interactive_inference(
+        self,
+        *,
+        prompt: str,
+        model_id: str | None,
+        envelope: dict,
+    ) -> ComputeNode:
+        if not isinstance(envelope, dict):
+            raise ValueError(
+                "inference requires an online CortexTerm compute participant"
+            )
+        request = envelope["request"]
+        if not isinstance(request, dict):
+            raise ValueError("inference participation request is invalid")
+        node_id = request.get("nodeId")
+        node = self.nodes.get(node_id)
+        if (
+            node is None
+            or not node.remote
+            or node.assignment is None
+            or node.role != "interactive-user"
+        ):
+            raise ValueError(
+                "inference requires an interactive CortexTerm compute participant"
+            )
+        self._expire_remote_nodes()
+        if node.status != "online":
+            raise ValueError("interactive compute participant is not online")
+        assignment_id = node.assignment["assignment"]["assignmentId"]
+        expected_model_id = model_id or self.model["id"]
+        expected = {
+            "protocol": JOIN_PROTOCOL,
+            "nodeId": node.id,
+            "assignmentId": assignment_id,
+            "modelId": expected_model_id,
+            "promptDigest": sha256(prompt.strip()),
+        }
+        if any(request.get(key) != value for key, value in expected.items()):
+            raise ValueError(
+                "inference authorization does not match the prompt or assignment"
+            )
+        require_fresh(request.get("timestampMs"))
+        nonce = request.get("nonce")
+        if not isinstance(nonce, str) or len(nonce) < 16:
+            raise ValueError("inference authorization nonce is invalid")
+        if not verify_payload(
+            node.worker.public_key,
+            INFERENCE_ACCESS_DOMAIN,
+            request,
+            envelope["signature"],
+        ):
+            raise ValueError("inference authorization signature is invalid")
+        if nonce in self._used_inference_nonces:
+            raise ValueError("inference authorization has already been used")
+        self._used_inference_nonces.add(nonce)
+        self._inference_nonce_order.append(nonce)
+        if len(self._inference_nonce_order) > 4096:
+            self._used_inference_nonces.discard(
+                self._inference_nonce_order.popleft()
+            )
+        return node
+
+    def run_participating_inference(
+        self,
+        prompt: str,
+        model_id: str | None,
+        participation: dict,
+    ) -> dict:
+        with self._lock:
+            participant = self._authorize_interactive_inference(
+                prompt=prompt,
+                model_id=model_id,
+                envelope=participation,
+            )
+            result = self.run_inference(prompt, model_id)
+            result["access"] = {
+                "mode": "compute-participant",
+                "computeContributionRequired": True,
+                "participantNodeId": participant.id,
+                "participantRewardAddress": participant.worker.reward_address,
+                "endUserWalletRequired": False,
+                "endUserFee": 0,
+                "symbol": TOKEN_SYMBOL,
+            }
+            return result
+
     def run_inference(self, prompt: str, model_id: str | None = None) -> dict:
         if not isinstance(prompt, str) or len(prompt.strip()) < 2:
             raise ValueError("prompt must contain at least 2 characters")
@@ -1384,6 +1483,10 @@ class CortexNetwork:
                 "name": "CortexGrid",
                 "environment": "devnet",
                 "protocolVersion": "0.1.0",
+                "purpose": (
+                    "Pool participant compute so members can run language "
+                    "models too large to afford or host alone."
+                ),
                 "coordinatorPublicKey": self.coordinator_wallet.public_key_hex,
                 "status": (
                     "healthy"
@@ -1393,6 +1496,16 @@ class CortexNetwork:
                 "metrics": {
                     "nodesOnline": len(online),
                     "nodesTotal": len(node_snapshots),
+                    "interactiveUsersOnline": sum(
+                        node["remote"]
+                        and node["role"] == "interactive-user"
+                        for node in online
+                    ),
+                    "dedicatedWorkersOnline": sum(
+                        node["remote"]
+                        and node["role"] == "dedicated-worker"
+                        for node in online
+                    ),
                     "totalMemoryGiB": sum(
                         node["memoryGiB"] for node in node_snapshots
                     ),

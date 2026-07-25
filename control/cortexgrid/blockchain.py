@@ -7,24 +7,30 @@ import threading
 from pathlib import Path
 from typing import Iterable
 
+from .economics import (
+    CAPACITY_TARGET_REPLICAS,
+    ECONOMICS_VERSION,
+    GENESIS_SUPPLY_MICRO,
+    INFERENCES_PER_EPOCH,
+    MAX_SUPPLY_MICRO,
+    TOKEN_SYMBOL,
+    TOKEN_UNIT,
+    build_economics_record,
+    public_policy,
+    scheduled_epoch_emission_micro,
+    tokens,
+)
 from .executor import ExecutionReceipt, verify_receipt_signature
 from .util import canonical_json, merkle_root, sha256, utc_now
 from .wallet import address_from_public_key, transfer_message, verify_signature
 
 
-TOKEN_UNIT = 1_000_000
-TOKEN_SYMBOL = "CTX"
-MAX_SUPPLY_MICRO = 1_000_000_000 * TOKEN_UNIT
-GENESIS_SUPPLY_MICRO = 1_000_000 * TOKEN_UNIT
 DEMO_BALANCE_MICRO = 10_000 * TOKEN_UNIT
-INFERENCE_FEE_MICRO = 1 * TOKEN_UNIT
-INFERENCE_EMISSION_MICRO = 200_000
+# Kept only to validate blocks produced by the original devnet policy.
+LEGACY_INFERENCE_FEE_MICRO = 1 * TOKEN_UNIT
+LEGACY_INFERENCE_EMISSION_MICRO = 200_000
 PROTOCOL_ADDRESS = "ctx_protocol_treasury"
 ESCROW_ADDRESS = "ctx_inference_escrow"
-
-
-def tokens(amount_micro: int) -> float:
-    return round(amount_micro / TOKEN_UNIT, 6)
 
 
 def receipt_digest(receipt: ExecutionReceipt) -> str:
@@ -64,29 +70,35 @@ def verify_proof_bundle(proof: dict) -> dict:
     }
 
 
-def inference_transactions(
+def _work_by_address(proof: dict) -> dict[str, dict]:
+    receipts = [ExecutionReceipt.from_dict(receipt) for receipt in proof["receipts"]]
+    work_by_address: dict[str, dict] = {}
+    for receipt in receipts:
+        address = address_from_public_key(receipt.public_key)
+        entry = work_by_address.setdefault(
+            address, {"computeUnits": 0, "nodeIds": set()}
+        )
+        entry["computeUnits"] += receipt.compute_units
+        entry["nodeIds"].add(receipt.node_id)
+    return work_by_address
+
+
+def _legacy_inference_transactions(
     *,
     proof: dict,
     payer: str,
     inference_id: str,
     current_supply_micro: int,
 ) -> list[dict]:
-    receipts = [ExecutionReceipt.from_dict(receipt) for receipt in proof["receipts"]]
-    work_by_address: dict[str, dict] = {}
-    for receipt in receipts:
-        address = address_from_public_key(receipt.public_key)
-        entry = work_by_address.setdefault(
-            address, {"workUnits": 0, "nodeIds": set()}
-        )
-        entry["workUnits"] += receipt.compute_units
-        entry["nodeIds"].add(receipt.node_id)
-
-    burn_amount = INFERENCE_FEE_MICRO * 8 // 100
-    protocol_amount = INFERENCE_FEE_MICRO * 12 // 100
-    provider_fee_pool = INFERENCE_FEE_MICRO - burn_amount - protocol_amount
+    work_by_address = _work_by_address(proof)
+    burn_amount = LEGACY_INFERENCE_FEE_MICRO * 8 // 100
+    protocol_amount = LEGACY_INFERENCE_FEE_MICRO * 12 // 100
+    provider_fee_pool = (
+        LEGACY_INFERENCE_FEE_MICRO - burn_amount - protocol_amount
+    )
     remaining_supply = MAX_SUPPLY_MICRO - current_supply_micro
-    issuance_pool = min(INFERENCE_EMISSION_MICRO, max(0, remaining_supply))
-    total_work = sum(entry["workUnits"] for entry in work_by_address.values())
+    issuance_pool = min(LEGACY_INFERENCE_EMISSION_MICRO, max(0, remaining_supply))
+    total_work = sum(entry["computeUnits"] for entry in work_by_address.values())
     if total_work <= 0:
         raise ValueError("inference proof contains no useful work")
 
@@ -95,7 +107,7 @@ def inference_transactions(
             "type": "inference_fee",
             "from": payer,
             "to": ESCROW_ADDRESS,
-            "amountMicro": INFERENCE_FEE_MICRO,
+            "amountMicro": LEGACY_INFERENCE_FEE_MICRO,
             "inferenceId": inference_id,
         },
         {
@@ -120,12 +132,12 @@ def inference_transactions(
         fee_reward = (
             provider_fee_pool - distributed_fee
             if is_last
-            else provider_fee_pool * work["workUnits"] // total_work
+            else provider_fee_pool * work["computeUnits"] // total_work
         )
         issuance_reward = (
             issuance_pool - distributed_issuance
             if is_last
-            else issuance_pool * work["workUnits"] // total_work
+            else issuance_pool * work["computeUnits"] // total_work
         )
         distributed_fee += fee_reward
         distributed_issuance += issuance_reward
@@ -134,7 +146,113 @@ def inference_transactions(
                 "type": "provider_reward",
                 "to": address,
                 "nodeIds": sorted(work["nodeIds"]),
-                "workUnits": work["workUnits"],
+                "workUnits": work["computeUnits"],
+                "feeAmountMicro": fee_reward,
+                "issuanceAmountMicro": issuance_reward,
+                "inferenceId": inference_id,
+            }
+        )
+    return transactions
+
+
+def inference_transactions(
+    *,
+    proof: dict,
+    payer: str,
+    inference_id: str,
+    current_supply_micro: int,
+    economics: dict,
+) -> list[dict]:
+    if economics.get("version") != ECONOMICS_VERSION:
+        raise ValueError("unsupported CTX economics version")
+    work_by_address = _work_by_address(proof)
+    metering = economics["metering"]
+    pricing = economics["pricing"]
+    emission = economics["emission"]
+    provider_work = metering["providerWorkUnits"]
+    provider_rates = pricing["providerRatesMicroPerWorkUnit"]
+    if set(provider_work) != set(work_by_address) or set(provider_rates) != set(
+        work_by_address
+    ):
+        raise ValueError("economics providers do not match inference receipts")
+    for address, work in work_by_address.items():
+        if int(provider_work[address]) <= 0:
+            raise ValueError("provider metered work must be positive")
+        if int(work["computeUnits"]) <= 0:
+            raise ValueError("provider compute work must be positive")
+
+    fee_micro = int(pricing["feeMicro"])
+    burn_micro = int(pricing["burnMicro"])
+    protocol_micro = int(pricing["protocolMicro"])
+    provider_fee_pool = int(pricing["providerPoolMicro"])
+    if fee_micro != burn_micro + protocol_micro + provider_fee_pool:
+        raise ValueError("CTX inference fee split does not conserve value")
+    remaining_supply = max(0, MAX_SUPPLY_MICRO - current_supply_micro)
+    issuance_pool = min(
+        int(emission["requestedIssuanceMicro"]),
+        int(emission["epochRemainingMicro"]),
+        remaining_supply,
+    )
+
+    transactions = [
+        {
+            "type": "inference_fee",
+            "from": payer,
+            "to": ESCROW_ADDRESS,
+            "amountMicro": fee_micro,
+            "inferenceId": inference_id,
+            "economicsVersion": ECONOMICS_VERSION,
+        },
+        {
+            "type": "burn",
+            "from": ESCROW_ADDRESS,
+            "amountMicro": burn_micro,
+            "inferenceId": inference_id,
+        },
+        {
+            "type": "protocol_fee",
+            "from": ESCROW_ADDRESS,
+            "to": PROTOCOL_ADDRESS,
+            "amountMicro": protocol_micro,
+            "inferenceId": inference_id,
+        },
+    ]
+    quote_by_address = {
+        address: int(provider_work[address]) * int(provider_rates[address])
+        for address in work_by_address
+    }
+    total_quote = sum(quote_by_address.values())
+    if total_quote <= 0:
+        raise ValueError("inference contains no priced provider work")
+
+    distributed_fee = 0
+    distributed_issuance = 0
+    ordered_providers = sorted(work_by_address.items())
+    for index, (address, work) in enumerate(ordered_providers):
+        is_last = index == len(ordered_providers) - 1
+        quoted = quote_by_address[address]
+        fee_reward = (
+            provider_fee_pool - distributed_fee
+            if is_last
+            else provider_fee_pool * quoted // total_quote
+        )
+        issuance_reward = (
+            issuance_pool - distributed_issuance
+            if is_last
+            else issuance_pool * int(provider_work[address])
+            // int(metering["meteredWorkUnits"])
+        )
+        distributed_fee += fee_reward
+        distributed_issuance += issuance_reward
+        transactions.append(
+            {
+                "type": "provider_reward",
+                "to": address,
+                "nodeIds": sorted(work["nodeIds"]),
+                "computeUnits": int(work["computeUnits"]),
+                "workUnits": int(provider_work[address]),
+                "priceMicroPerWorkUnit": int(provider_rates[address]),
+                "quotedAmountMicro": quoted,
                 "feeAmountMicro": fee_reward,
                 "issuanceAmountMicro": issuance_reward,
                 "inferenceId": inference_id,
@@ -192,6 +310,7 @@ class Blockchain:
                     "symbol": TOKEN_SYMBOL,
                     "decimals": 6,
                     "maxSupplyMicro": MAX_SUPPLY_MICRO,
+                    "economicsVersion": ECONOMICS_VERSION,
                 },
                 "models": [self.model_manifest],
             },
@@ -327,6 +446,88 @@ class Blockchain:
         for block in self.blocks:
             self._apply_transactions(block["transactions"])
 
+    @staticmethod
+    def _inference_fee_micro(block: dict) -> int:
+        return sum(
+            int(transaction["amountMicro"])
+            for transaction in block["transactions"]
+            if transaction["type"] == "inference_fee"
+        )
+
+    @staticmethod
+    def _inference_issuance_micro(block: dict) -> int:
+        return sum(
+            int(transaction["issuanceAmountMicro"])
+            for transaction in block["transactions"]
+            if transaction["type"] == "provider_reward"
+        )
+
+    def economic_context(self, blocks: list[dict] | None = None) -> dict:
+        source = self.blocks if blocks is None else blocks
+        inference_blocks = [
+            block for block in source if block.get("kind") == "inference"
+        ]
+        inference_index = len(inference_blocks)
+        epoch = inference_index // INFERENCES_PER_EPOCH
+        epoch_start = epoch * INFERENCES_PER_EPOCH
+        current_epoch_blocks = inference_blocks[epoch_start:]
+        return {
+            "inferenceIndex": inference_index,
+            "epoch": epoch,
+            "epochFeesMicro": sum(
+                self._inference_fee_micro(block) for block in current_epoch_blocks
+            ),
+            "epochIssuanceMicro": sum(
+                self._inference_issuance_micro(block)
+                for block in current_epoch_blocks
+            ),
+            "epochBudgetMicro": scheduled_epoch_emission_micro(epoch),
+        }
+
+    def _expected_economics(
+        self,
+        *,
+        proof: dict,
+        supplied: dict,
+        history: list[dict] | None = None,
+    ) -> dict:
+        work = _work_by_address(proof)
+        context = self.economic_context(history)
+        metering = supplied["metering"]
+        emission = supplied["emission"]
+        target_capacity_units = (
+            sum(
+                int(shard["computeUnits"])
+                for shard in self.model_manifest["shards"]
+            )
+            * CAPACITY_TARGET_REPLICAS
+        )
+        return build_economics_record(
+            inference_index=context["inferenceIndex"],
+            model_compute_units=sum(
+                int(item["computeUnits"]) for item in work.values()
+            ),
+            input_tokens=int(metering["inputTokens"]),
+            output_tokens=int(metering["outputTokens"]),
+            kernel_micros=sum(
+                int(receipt["kernelMicros"]) for receipt in proof["receipts"]
+            ),
+            provider_rates_micro={
+                address: int(rate)
+                for address, rate in supplied["pricing"][
+                    "providerRatesMicroPerWorkUnit"
+                ].items()
+            },
+            provider_compute_units={
+                address: int(item["computeUnits"])
+                for address, item in work.items()
+            },
+            ready_capacity_units=int(emission["readyCapacityUnits"]),
+            target_capacity_units=target_capacity_units,
+            epoch_fees_before_micro=context["epochFeesMicro"],
+            epoch_issuance_before_micro=context["epochIssuanceMicro"],
+        )
+
     def commit_inference(
         self,
         *,
@@ -334,6 +535,7 @@ class Blockchain:
         payer: str,
         model: dict,
         proof: dict,
+        economics: dict,
         input_digest: str,
         output_digest: str,
     ) -> dict:
@@ -341,7 +543,13 @@ class Blockchain:
             proof_check = verify_proof_bundle(proof)
             if not proof_check["valid"]:
                 raise ValueError("cannot mint CTX from an invalid inference proof")
-            if self.balances.get(payer, 0) < INFERENCE_FEE_MICRO:
+            expected_economics = self._expected_economics(
+                proof=proof, supplied=economics
+            )
+            if canonical_json(expected_economics) != canonical_json(economics):
+                raise ValueError("inference economics record is invalid")
+            fee_micro = int(economics["pricing"]["feeMicro"])
+            if self.balances.get(payer, 0) < fee_micro:
                 raise ValueError(f"insufficient {TOKEN_SYMBOL} for inference")
 
             receipts = [
@@ -352,6 +560,7 @@ class Blockchain:
                 payer=payer,
                 inference_id=inference_id,
                 current_supply_micro=self.total_supply_micro,
+                economics=economics,
             )
 
             block = {
@@ -373,6 +582,7 @@ class Blockchain:
                     "usefulWorkUnits": sum(
                         receipt.compute_units for receipt in receipts
                     ),
+                    "economics": economics,
                     "proof": proof,
                 },
                 "transactions": transactions,
@@ -500,12 +710,33 @@ class Blockchain:
                         or block["transactions"][0]["type"] != "inference_fee"
                     ):
                         raise ValueError(f"inference fee missing at block {height}")
-                    expected = inference_transactions(
-                        proof=payload["proof"],
-                        payer=block["transactions"][0]["from"],
-                        inference_id=inference_id,
-                        current_supply_micro=counters["supply"],
-                    )
+                    economics = payload.get("economics")
+                    if economics is None:
+                        expected = _legacy_inference_transactions(
+                            proof=payload["proof"],
+                            payer=block["transactions"][0]["from"],
+                            inference_id=inference_id,
+                            current_supply_micro=counters["supply"],
+                        )
+                    else:
+                        expected_economics = self._expected_economics(
+                            proof=payload["proof"],
+                            supplied=economics,
+                            history=self.blocks[:height],
+                        )
+                        if canonical_json(expected_economics) != canonical_json(
+                            economics
+                        ):
+                            raise ValueError(
+                                f"economics record is invalid at block {height}"
+                            )
+                        expected = inference_transactions(
+                            proof=payload["proof"],
+                            payer=block["transactions"][0]["from"],
+                            inference_id=inference_id,
+                            current_supply_micro=counters["supply"],
+                            economics=economics,
+                        )
                     if canonical_json(expected) != canonical_json(
                         block["transactions"]
                     ):
@@ -562,6 +793,7 @@ class Blockchain:
 
     def snapshot(self) -> dict:
         with self._lock:
+            economic_context = self.economic_context()
             balances = [
                 {"address": address, "balance": tokens(amount)}
                 for address, amount in self.balances.items()
@@ -581,6 +813,28 @@ class Blockchain:
                     "totalSupply": tokens(self.total_supply_micro),
                     "totalBurned": tokens(self.total_burned_micro),
                     "providerRewards": tokens(self.total_provider_rewards_micro),
+                },
+                "economics": {
+                    **public_policy(),
+                    "currentEpoch": {
+                        "index": economic_context["epoch"],
+                        "inferenceOffset": (
+                            economic_context["inferenceIndex"]
+                            % INFERENCES_PER_EPOCH
+                        ),
+                        "fees": tokens(economic_context["epochFeesMicro"]),
+                        "issuance": tokens(
+                            economic_context["epochIssuanceMicro"]
+                        ),
+                        "budget": tokens(economic_context["epochBudgetMicro"]),
+                        "remainingBudget": tokens(
+                            max(
+                                0,
+                                economic_context["epochBudgetMicro"]
+                                - economic_context["epochIssuanceMicro"],
+                            )
+                        ),
+                    },
                 },
                 "demoWallet": {
                     "address": self.demo_address,

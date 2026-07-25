@@ -94,11 +94,17 @@ def verify_receipt_signature(receipt: ExecutionReceipt) -> bool:
 class NativeWorker:
     """One persistent C++ executor process with a tiny tab-delimited protocol."""
 
-    def __init__(self, node_id: str, executable: Path, timeout_seconds: float = 10):
+    def __init__(
+        self,
+        node_id: str,
+        executable: Path,
+        timeout_seconds: float = 10,
+        wallet: Wallet | None = None,
+    ):
         self.node_id = node_id
         self.executable = executable
         self.timeout_seconds = timeout_seconds
-        self.wallet = Wallet.generate()
+        self.wallet = wallet or Wallet.generate()
         self.public_key = ""
         self.capabilities: list[str] = []
         self._lock = threading.Lock()

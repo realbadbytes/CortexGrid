@@ -41,6 +41,7 @@ class DistributedModelRuntime:
             node_id: self.base_port + index
             for index, node_id in enumerate(self.node_ids)
         }
+        self._remote_endpoints: dict[str, str] = {}
         self._rpc_processes: dict[str, subprocess.Popen[bytes]] = {}
         self._rpc_logs: dict[str, object] = {}
         self._gateway: subprocess.Popen[bytes] | None = None
@@ -90,6 +91,8 @@ class DistributedModelRuntime:
         raise TimeoutError(f"model runtime did not bind port {port}")
 
     def _start_rpc(self, node_id: str) -> None:
+        if node_id in self._remote_endpoints:
+            return
         current = self._rpc_processes.get(node_id)
         if current is not None and current.poll() is None:
             return
@@ -112,6 +115,14 @@ class DistributedModelRuntime:
         self._rpc_processes[node_id] = process
         self._rpc_logs[node_id] = log
         self._wait_for_port(port, process)
+
+    def register_remote(self, node_id: str, rpc_endpoint: str) -> None:
+        if node_id in self._node_ports:
+            raise ValueError("a local model participant already uses this node id")
+        self._remote_endpoints[node_id] = rpc_endpoint
+
+    def unregister_remote(self, node_id: str) -> None:
+        self._remote_endpoints.pop(node_id, None)
 
     def _health(self) -> bool:
         try:
@@ -142,7 +153,11 @@ class DistributedModelRuntime:
         route = tuple(node_ids)
         if not route or len(set(route)) != len(route):
             raise ValueError("a model route needs one or more distinct nodes")
-        if any(node_id not in self._node_ports for node_id in route):
+        if any(
+            node_id not in self._node_ports
+            and node_id not in self._remote_endpoints
+            for node_id in route
+        ):
             raise ValueError("route contains an unknown model participant")
         if (
             route == self._active_route
@@ -156,7 +171,10 @@ class DistributedModelRuntime:
         for node_id in route:
             self._start_rpc(node_id)
         endpoints = ",".join(
-            f"127.0.0.1:{self._node_ports[node_id]}" for node_id in route
+            self._remote_endpoints.get(
+                node_id, f"127.0.0.1:{self._node_ports.get(node_id, 0)}"
+            )
+            for node_id in route
         )
         tensor_split = ",".join("1" for _ in route)
         self._gateway_log = (self.data_dir / "model-gateway.log").open("ab")
@@ -246,6 +264,7 @@ class DistributedModelRuntime:
         }
 
     def snapshot(self) -> dict:
+        participant_ids = self.node_ids + sorted(self._remote_endpoints)
         return {
             "available": True,
             "active": self._health() if self._gateway is not None else False,
@@ -256,13 +275,22 @@ class DistributedModelRuntime:
             "participants": [
                 {
                     "nodeId": node_id,
-                    "endpoint": f"127.0.0.1:{self._node_ports[node_id]}",
+                    "endpoint": self._remote_endpoints.get(
+                        node_id, f"127.0.0.1:{self._node_ports.get(node_id, 0)}"
+                    ),
+                    "remote": node_id in self._remote_endpoints,
                     "resident": (
-                        node_id in self._rpc_processes
-                        and self._rpc_processes[node_id].poll() is None
+                        (
+                            node_id in self._remote_endpoints
+                            and node_id in self._active_route
+                        )
+                        or (
+                            node_id in self._rpc_processes
+                            and self._rpc_processes[node_id].poll() is None
+                        )
                     ),
                 }
-                for node_id in self.node_ids
+                for node_id in participant_ids
             ],
         }
 

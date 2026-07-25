@@ -9,6 +9,10 @@ description = "Distributed AI hosting with proof-of-useful-inference settlement"
 requires-python = ">=3.11"
 dependencies = ["cryptography>=38"]
 
+[project.scripts]
+CortexTerm = "cortexgrid.terminal:main"
+CortexNode = "cortexgrid.provider_cli:main"
+
 [tool.setuptools]
 packages = ["cortexgrid"]
 

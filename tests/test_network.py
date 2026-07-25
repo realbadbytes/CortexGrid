@@ -11,6 +11,7 @@ from cortexgrid.blockchain import (
     TOKEN_UNIT,
     verify_proof_bundle,
 )
+from cortexgrid.economics import ECONOMICS_VERSION
 from cortexgrid.network import CortexNetwork
 from cortexgrid.wallet import Wallet
 
@@ -46,13 +47,40 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(len(result["proof"]["receipts"]), 12)
         self.assertTrue(verify_proof_bundle(result["proof"])["valid"])
         self.assertTrue(self.network.chain.validate()["valid"])
-        self.assertEqual(result["accounting"]["fee"], 1.0)
-        self.assertEqual(result["accounting"]["burned"], 0.08)
-        self.assertEqual(result["accounting"]["issuance"], 0.2)
+        accounting = result["accounting"]
+        self.assertEqual(accounting["economicsVersion"], ECONOMICS_VERSION)
+        self.assertEqual(accounting["endUserFee"], 0)
+        self.assertGreater(accounting["sponsorFee"], 0)
+        self.assertLess(accounting["sponsorFee"], 1.0)
+        self.assertGreater(accounting["providerFeeRewards"], 0)
+        self.assertGreater(accounting["issuance"], 0)
+        self.assertEqual(accounting["capacityUnlockPercent"], 100.0)
+        transactions = self.network.chain.blocks[-1]["transactions"]
+        burned_micro = next(
+            transaction["amountMicro"]
+            for transaction in transactions
+            if transaction["type"] == "burn"
+        )
+        issuance_micro = sum(
+            transaction["issuanceAmountMicro"]
+            for transaction in transactions
+            if transaction["type"] == "provider_reward"
+        )
         self.assertEqual(
             self.network.chain.total_supply_micro,
-            GENESIS_SUPPLY_MICRO + 120_000,
+            GENESIS_SUPPLY_MICRO - burned_micro + issuance_micro,
         )
+        economics = self.network.chain.blocks[-1]["payload"]["economics"]
+        self.assertEqual(
+            economics["metering"]["meteredWorkUnits"],
+            sum(economics["metering"]["providerWorkUnits"].values()),
+        )
+        for transaction in transactions:
+            if transaction["type"] == "provider_reward":
+                self.assertGreaterEqual(
+                    transaction["feeAmountMicro"],
+                    transaction["quotedAmountMicro"],
+                )
 
     def test_replica_routing_survives_one_offline_node(self) -> None:
         self.network.set_node_status("atlas", "offline")

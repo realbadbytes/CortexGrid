@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +48,7 @@ class Wallet:
     @classmethod
     def load_or_create(cls, path: Path) -> "Wallet":
         if path.exists():
+            path.chmod(0o600)
             data = json.loads(path.read_text(encoding="utf-8"))
             private_key = Ed25519PrivateKey.from_private_bytes(
                 bytes.fromhex(data["privateKey"])
@@ -55,11 +57,18 @@ class Wallet:
 
         wallet = cls.generate()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"privateKey": wallet.private_key_hex}, indent=2) + "\n",
-            encoding="utf-8",
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
         )
-        path.chmod(0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as wallet_file:
+            wallet_file.write(
+                json.dumps({"privateKey": wallet.private_key_hex}, indent=2)
+                + "\n"
+            )
+            wallet_file.flush()
+            os.fsync(wallet_file.fileno())
         return wallet
 
     @property

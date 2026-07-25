@@ -3,14 +3,15 @@
 ## Devnet data flow
 
 ```text
-1. Client submits prompt and pays 1 CTX
+1. A wallet-free end user submits a prompt through CortexTerm or the HTTP API
 2. Python selects one online replica for each of two model stages
 3. A persistent llama.cpp gateway loads tensors across both RPC participants
 4. The real SmolLM2 model performs prefill and autoregressive generation
 5. Both participant identities sign chained participation attestations
 6. Python verifies every signature and commitment link
 7. Receipt digests form a Merkle root
-8. One useful-work block settles fee, burn, rewards, and issuance
+8. One useful-work block settles the metered gateway fee, burn, rewards, and
+   capacity-and-demand-limited issuance
 ```
 
 The chain accepts an inference block only when:
@@ -22,6 +23,7 @@ The chain accepts an inference block only when:
 - reward recipients are derived from receipt public keys;
 - the fee split and work-weighted rewards are exact;
 - capped issuance does not exceed the maximum supply;
+- metered prices, capacity/demand unlocks, and epoch limits recompute exactly;
 - balances conserve the resulting total supply.
 
 Transfers use Ed25519 signatures and per-wallet nonces. They cannot invoke the
@@ -45,17 +47,35 @@ llama.cpp gateway
        └════ remote tensor work ════▶ RPC participant B
 ```
 
-The RPC servers bind only to loopback because upstream documents that transport
-as a proof of concept without authentication. Production replaces this star
-transport with the same logical stage interface over authenticated,
-worker-to-worker streams.
+Built-in RPC servers bind to loopback. Independently operated providers can run
+the node daemon across a trusted private network. The daemon owns its key,
+registers its capabilities and endpoints, verifies its signed stage assignment,
+heartbeats, and accepts only coordinator-signed work tickets.
+
+```text
+Provider                 Coordinator
+   │ REGISTER + signature    │
+   ├────────────────────────▶│
+   │ signed stage assignment │
+   │◀────────────────────────┤
+   │ READY + signature       │
+   ├────────────────────────▶│
+   │ heartbeat / balance     │
+   ├────────────────────────▶│
+```
+
+When selected, llama.cpp transfers the assigned layer tensors into
+provider-owned RPC buffers in RAM/VRAM; its optional cache can persist large
+tensors. The provider signs its own inference receipt, so CTX rewards are
+derived from the provider's public key rather than a coordinator-owned
+identity.
 
 ## Production sequence
 
 Keep the same three boundaries and deepen them in this order:
 
-1. Wrap the model backend and signer into one remotely deployable node daemon.
-2. Add direct authenticated peer transport and route tickets.
+1. Replace llama.cpp's unauthenticated tensor RPC with authenticated transport.
+2. Add direct worker-to-worker activation streams.
 3. Add redundant execution sampling or trusted/zero-knowledge execution so signatures
    prove correctness, not only node authorship.
 4. Replicate the Python state machine behind a Byzantine-finality protocol.

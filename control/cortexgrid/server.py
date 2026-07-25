@@ -80,6 +80,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "service": "cortex-grid-control-plane",
                         "executionPlane": "c++/cuda",
+                        "coordinatorPublicKey": (
+                            network.coordinator_wallet.public_key_hex
+                        ),
                         "chainValid": network.chain.validate()["valid"],
                     },
                 )
@@ -87,6 +90,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._json(200, network.snapshot())
             elif path == "/api/chain":
                 self._json(200, network.chain.snapshot())
+            elif path == "/api/economics":
+                self._json(200, network.chain.snapshot()["economics"])
             elif path == "/api/nodes":
                 self._json(
                     200,
@@ -97,6 +102,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                         ]
                     },
                 )
+            elif match := re.fullmatch(r"/api/nodes/([a-z0-9_-]+)", path):
+                self._json(200, network.node_snapshot(match.group(1)))
             elif path == "/api/models":
                 self._json(200, {"models": [network.public_model()]})
             elif path == "/api/openapi.json":
@@ -134,6 +141,26 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/transfers":
                 block = network.chain.commit_transfer(body)
                 self._json(201, Blockchain.public_block(block))
+            elif path == "/api/nodes/register":
+                self._json(201, network.register_remote_node(body))
+            elif match := re.fullmatch(
+                r"/api/nodes/([a-z0-9_-]+)/ready", path
+            ):
+                self._json(
+                    200, network.mark_remote_ready(match.group(1), body)
+                )
+            elif match := re.fullmatch(
+                r"/api/nodes/([a-z0-9_-]+)/heartbeat", path
+            ):
+                self._json(
+                    200, network.heartbeat_remote_node(match.group(1), body)
+                )
+            elif match := re.fullmatch(
+                r"/api/nodes/([a-z0-9_-]+)/leave", path
+            ):
+                self._json(
+                    200, network.leave_remote_node(match.group(1), body)
+                )
             elif match := re.fullmatch(
                 r"/api/nodes/([a-z0-9_-]+)/status", path
             ):
@@ -177,6 +204,9 @@ def openapi_document(port: int) -> dict:
         "paths": {
             "/api/network": {"get": {"summary": "Network-wide snapshot"}},
             "/api/chain": {"get": {"summary": "CTX chain and balances"}},
+            "/api/economics": {
+                "get": {"summary": "CTX pricing, emission policy, and epoch state"}
+            },
             "/api/blocks/{height}": {
                 "get": {"summary": "Full block with inference receipts"}
             },
@@ -190,6 +220,21 @@ def openapi_document(port: int) -> dict:
             },
             "/api/transfers": {
                 "post": {"summary": "Submit an Ed25519-signed CTX transfer"}
+            },
+            "/api/nodes/register": {
+                "post": {"summary": "Register and receive a signed model assignment"}
+            },
+            "/api/nodes/{nodeId}": {
+                "get": {"summary": "Inspect assignment, jobs, and CTX balance"}
+            },
+            "/api/nodes/{nodeId}/ready": {
+                "post": {"summary": "Submit signed assignment readiness"}
+            },
+            "/api/nodes/{nodeId}/heartbeat": {
+                "post": {"summary": "Renew a signed provider lease"}
+            },
+            "/api/nodes/{nodeId}/leave": {
+                "post": {"summary": "Leave routing with a signed provider request"}
             },
             "/api/nodes/{nodeId}/status": {
                 "post": {"summary": "Toggle a devnet node to exercise failover"}

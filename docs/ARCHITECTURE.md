@@ -4,8 +4,8 @@
 
 ```text
 1. A wallet-free end user submits a prompt through CortexTerm or the HTTP API
-2. Python selects one online replica for each of two model stages
-3. A persistent llama.cpp gateway loads tensors across both RPC participants
+2. Python selects one online replica for every ordered model stage
+3. A persistent llama.cpp gateway loads tensors across the selected RPC route
 4. The real SmolLM2 model performs prefill and autoregressive generation
 5. Both participant identities sign chained participation attestations
 6. Python verifies every signature and commitment link
@@ -36,24 +36,29 @@ inspect: placement, routing, process lifecycle, verification, settlement, and
 HTTP. llama.cpp owns model tensors, KV cache, tokenization, sampling, and
 C++/CUDA computation.
 
-The first real-model milestone uses llama.cpp's private RPC gateway:
+The real-model path uses llama.cpp behind a controller-owned mTLS gateway:
 
 ```text
 Python coordinator
-       │ route
+       │ sole client certificate
        ▼
 llama.cpp gateway
-       ├════ remote tensor work ════▶ RPC participant A
-       └════ remote tensor work ════▶ RPC participant B
+       ├════ TLS 1.3 + provider pin ════▶ TLS tunnel A → loopback RPC A
+       └════ TLS 1.3 + provider pin ════▶ TLS tunnel B → loopback RPC B
 ```
 
-Built-in RPC servers bind to loopback. Independently operated providers can run
-the node daemon across a trusted private network. The daemon owns its key,
-registers its capabilities and endpoints, verifies its signed stage assignment,
-heartbeats, and accepts only coordinator-signed work tickets.
+Every raw RPC server binds to loopback. A provider exposes only an mTLS tunnel
+that requires a CA-valid certificate and the exact controller client
+certificate fingerprint. The controller pins the provider certificate before
+placing it in a route. A network member has a server-only certificate and
+cannot invoke another member's RPC endpoint.
 
 ```text
 Provider                 Coordinator
+   │ signed CSR              │
+   ├────────────────────────▶│
+   │ server-only certificate │
+   │◀────────────────────────┤
    │ REGISTER + signature    │
    ├────────────────────────▶│
    │ signed stage assignment │
@@ -70,12 +75,26 @@ tensors. The provider signs its own inference receipt, so CTX rewards are
 derived from the provider's public key rather than a coordinator-owned
 identity.
 
+## Five TiB capacity profile
+
+The built-in `5tb` profile is an exact 5 TiB manifest: 160 stages contain 32 GiB
+of weights each and reserve 40 GiB each. One complete route therefore requires
+160 compatible providers and 6.25 TiB of aggregate RAM. Target replication
+requires 320 placements and 12.5 TiB of aggregate RAM. Placement always chooses
+the compatible stage with the fewest replicas; model readiness requires at
+least one online replica for every stage.
+
+The profile's artifact descriptors are deliberately marked unavailable. They
+prove that assignment, byte accounting, commitments, coverage, and failure
+states scale to the target without claiming that a 5 TiB checkpoint exists in
+this repository.
+
 ## Production sequence
 
 Keep the same three boundaries and deepen them in this order:
 
-1. Replace llama.cpp's unauthenticated tensor RPC with authenticated transport.
-2. Add direct worker-to-worker activation streams.
+1. Add certificate expiry automation, revocation, and controller key rotation.
+2. Add direct worker-to-worker activation streams with per-job authorization.
 3. Add redundant execution sampling or trusted/zero-knowledge execution so signatures
    prove correctness, not only node authorship.
 4. Replicate the Python state machine behind a Byzantine-finality protocol.

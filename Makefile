@@ -1,4 +1,4 @@
-.PHONY: build build-model-runtime build-provider-runtime bootstrap-model bootstrap-provider run run-real join term node test test-real check clean
+.PHONY: build build-model-runtime build-provider-runtime bootstrap-model bootstrap-provider run run-real run-5tb join term node test test-real check clean
 
 BUILD_DIR ?= build
 CMAKE_BUILD_TYPE ?= Release
@@ -58,6 +58,9 @@ run: build
 run-real: build build-model-runtime
 	test -f $(MODEL_FILE)
 	PYTHONPATH=control CORTEX_REAL_MODEL=on CORTEX_EXECUTOR_PATH=$(CURDIR)/$(BUILD_DIR)/cortex_worker CORTEX_MODEL_PATH=$(CURDIR)/$(MODEL_FILE) CORTEX_RPC_BINARY=$(CURDIR)/$(LLAMA_BUILD_DIR)/bin/ggml-rpc-server CORTEX_MODEL_SERVER_BINARY=$(CURDIR)/$(LLAMA_BUILD_DIR)/bin/llama-server PORT=$(PORT) python3 -m cortexgrid.server
+
+run-5tb: build
+	PYTHONPATH=control CORTEX_MODEL_PROFILE=5tb CORTEX_EXECUTOR_PATH=$(CURDIR)/$(BUILD_DIR)/cortex_worker PORT=$(PORT) python3 -m cortexgrid.server
 
 join: build build-provider-runtime
 	PYTHONPATH=control python3 -m cortexgrid.node_daemon --coordinator $(COORDINATOR_URL) $(if $(COORDINATOR_PUBLIC_KEY),--coordinator-public-key $(COORDINATOR_PUBLIC_KEY),) --node-id $(NODE_ID) --name "$(NODE_NAME)" --operator "$(OPERATOR)" --region $(REGION) --memory-gib $(MEMORY_GIB) --price-micro-per-work-unit $(PROVIDER_PRICE_MICRO) --advertise-host $(ADVERTISE_HOST) --api-port $(PROVIDER_API_PORT) --rpc-port $(PROVIDER_RPC_PORT) --executor $(CURDIR)/$(BUILD_DIR)/cortex_worker --rpc-binary $(CURDIR)/$(LLAMA_BUILD_DIR)/bin/ggml-rpc-server

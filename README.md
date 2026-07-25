@@ -4,12 +4,7 @@ CortexGrid is a devnet for distributed AI inference with a native utility
 token. Python coordinates inference and consensus; llama.cpp runs model layers
 on native C++/CUDA participants.
 
-```text
-Client → Python coordinator → llama.cpp gateway
-                              ├─ Atlas: layers 0–14
-                              └─ Ember: layers 15–29
-                    → signed attestations → CTX block and rewards
-```
+![CortexGrid 5 TiB distributed inference architecture](docs/assets/cortexgrid-5tb-architecture.svg)
 
 The included SmolLM2 135M Q4_K_M model is split across two private RPC
 participants. Each stage has three candidate replicas, so an unavailable node
@@ -28,6 +23,25 @@ make run-real
 ```
 
 Open <http://localhost:4173>.
+
+## Plan a 5 TiB model
+
+The capacity profile describes exactly 5 TiB of weights as 160 ordered 32 GiB
+stages. Each placement reserves 40 GiB for weights plus runtime overhead:
+160 compatible providers and 6.25 TiB aggregate RAM make one complete route;
+320 providers and 12.5 TiB make the target two-copy layout.
+
+```bash
+make run-5tb
+curl http://localhost:4173/api/models/capacity | python3 -m json.tool
+```
+
+New providers are assigned the least-replicated compatible stage. The signed
+assignment includes its layer range, exact byte size, artifact URL, SHA-256
+commitment, and RAM floor. Readiness remains false while any stage is missing.
+This built-in profile validates placement, routing, and capacity logistics; it
+does not bundle or pretend to execute an unpublished 5 TiB checkpoint
+(`artifactsAvailable` is `false`).
 
 ## Use the network with CortexTerm
 
@@ -85,11 +99,15 @@ make join \
   ADVERTISE_HOST=PROVIDER_IP
 ```
 
-The provider opens its signed control API on port `51800` and model RPC backend
-on `50052`. Both addresses must be reachable from the coordinator. Use a private
-network or VPN: upstream llama.cpp RPC is not authenticated and must not be
-exposed directly to the public Internet. Obtain the coordinator public key from
-the network operator or `GET /api/health`; the provider pins it on first use.
+The provider opens its signed control API on port `51800` and a TLS 1.3 model
+RPC endpoint on `50052`. Both must be reachable from the coordinator. The raw
+llama.cpp socket binds only to provider loopback. Its external mTLS tunnel
+requires the controller CA and the exact pinned controller client certificate;
+the controller also pins each provider certificate. Other providers and
+ordinary Internet clients cannot invoke tensor RPC. Obtain the coordinator
+public key out of band and pass it as `COORDINATOR_PUBLIC_KEY` on the first
+start; secure RPC refuses trust-on-first-use. The provider then verifies and
+pins the signed RPC trust bundle and stage assignment.
 
 Registration returns a coordinator-signed assignment containing the model
 version, stage number, layer range, memory requirement, and weight commitment.
@@ -142,6 +160,7 @@ curl http://COORDINATOR_IP:4173/api/health       # coordinator and chain health
 curl http://COORDINATOR_IP:4173/api/network      # aggregate capacity and activity
 curl http://COORDINATOR_IP:4173/api/nodes        # every provider and assignment
 curl http://COORDINATOR_IP:4173/api/models       # model stages and replicas
+curl http://COORDINATOR_IP:4173/api/models/capacity # RAM needs and missing stages
 curl http://COORDINATOR_IP:4173/api/chain        # supply, balances, and blocks
 curl http://COORDINATOR_IP:4173/api/economics    # rates and current emission epoch
 curl http://COORDINATOR_IP:4173/api/blocks/1     # one block with full receipts
@@ -177,7 +196,8 @@ make test-real
 ```
 
 The real-model suite verifies two-node generation, equality with a
-deterministic one-node reference, valid CTX settlement, and replica failover.
+deterministic one-node reference, valid CTX settlement, replica failover, and a
+remote provider carrying real tensor traffic through controller-only mTLS.
 The build uses CUDA automatically when `nvcc` is available and otherwise uses
 llama.cpp's CPU backend.
 
@@ -191,12 +211,14 @@ Pinned artifacts:
 ## Current boundary
 
 Remote providers can join, but this remains a devnet. Registration, assignments,
-readiness, heartbeats, and work tickets are signed; the underlying llama.cpp RPC
-tensor transport is still experimental and unauthenticated. Keep it on a
-trusted private network. Worker signatures prove participation and make token
-settlement auditable; they do not yet prove every numerical operation.
-Production still needs authenticated tensor transport, replicated correctness
-checks, and Byzantine block finality.
+readiness, heartbeats, and work tickets are signed. Tensor RPC is encrypted with
+TLS 1.3 and mutually authenticated so only the controller identity reaches a
+provider's loopback llama.cpp backend. The JSON control API is still HTTP; use
+an HTTPS reverse proxy or VPN when metadata confidentiality matters. Worker
+signatures prove participation and make token settlement auditable; they do not
+yet prove every numerical operation. Production still needs certificate
+rotation/revocation, replicated correctness checks, and Byzantine block
+finality.
 
 CTX has protocol utility, but utility cannot guarantee market price or monetary
 value. A public launch requires independent security, economic, and legal

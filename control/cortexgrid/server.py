@@ -92,6 +92,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._json(200, network.chain.snapshot())
             elif path == "/api/economics":
                 self._json(200, network.chain.snapshot()["economics"])
+            elif path == "/api/rpc/trust":
+                self._json(200, network.rpc_trust_bundle())
             elif path == "/api/nodes":
                 self._json(
                     200,
@@ -106,6 +108,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._json(200, network.node_snapshot(match.group(1)))
             elif path == "/api/models":
                 self._json(200, {"models": [network.public_model()]})
+            elif path == "/api/models/capacity":
+                self._json(200, network.model_capacity())
             elif path == "/api/openapi.json":
                 self._json(200, openapi_document(self.server.server_port))
             elif match := re.fullmatch(r"/api/blocks/(\d+)", path):
@@ -141,6 +145,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             elif path == "/api/transfers":
                 block = network.chain.commit_transfer(body)
                 self._json(201, Blockchain.public_block(block))
+            elif path == "/api/rpc/certificates":
+                self._json(201, network.issue_rpc_certificate(body))
             elif path == "/api/nodes/register":
                 self._json(201, network.register_remote_node(body))
             elif match := re.fullmatch(
@@ -221,8 +227,19 @@ def openapi_document(port: int) -> dict:
             "/api/transfers": {
                 "post": {"summary": "Submit an Ed25519-signed CTX transfer"}
             },
+            "/api/rpc/trust": {
+                "get": {"summary": "Get the signed controller RPC trust bundle"}
+            },
+            "/api/rpc/certificates": {
+                "post": {"summary": "Issue a provider-only RPC server certificate"}
+            },
             "/api/nodes/register": {
                 "post": {"summary": "Register and receive a signed model assignment"}
+            },
+            "/api/models/capacity": {
+                "get": {
+                    "summary": "Inspect model memory requirements and stage coverage"
+                }
             },
             "/api/nodes/{nodeId}": {
                 "get": {"summary": "Inspect assignment, jobs, and CTX balance"}

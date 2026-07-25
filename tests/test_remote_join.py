@@ -24,6 +24,28 @@ EXECUTOR_PATH = Path(
 
 
 class RemoteJoinTests(unittest.TestCase):
+    def test_secure_rpc_requires_an_out_of_band_coordinator_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                RuntimeError, "requires the coordinator public key"
+            ):
+                ProviderNode(
+                    coordinator_url="http://127.0.0.1:4173",
+                    node_id="unpinned-provider",
+                    name="Unpinned Provider",
+                    operator="Test",
+                    region="local",
+                    memory_gib=8,
+                    network_latency_ms=1,
+                    executor_path=EXECUTOR_PATH,
+                    rpc_binary=PROJECT_ROOT
+                    / "build"
+                    / "llama"
+                    / "bin"
+                    / "ggml-rpc-server",
+                    data_dir=Path(directory),
+                )
+
     def test_remote_provider_joins_executes_and_receives_ctx(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

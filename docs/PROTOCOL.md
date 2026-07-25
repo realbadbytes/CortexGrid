@@ -81,16 +81,29 @@ each remote provider—not the coordinator—owns its node key.
 
 Remote providers use `cortex-join-v1`:
 
-1. `POST /api/nodes/register` with capabilities, RPC/control endpoints,
+1. `GET /api/rpc/trust` returns the coordinator-signed RPC CA and the sole
+   controller client-certificate fingerprint.
+2. The provider verifies the pinned coordinator Ed25519 key, creates its own
+   TLS key, and submits a signed CSR to `POST /api/rpc/certificates`.
+3. The coordinator returns a signed, server-auth-only certificate. The
+   provider starts raw llama.cpp RPC on loopback and exposes a TLS 1.3 tunnel
+   that requires and pins the controller certificate.
+4. `POST /api/nodes/register` sends capabilities, RPC/control endpoints,
    micro-CTX/work-unit bid, timestamp, nonce, public key, and an Ed25519
    signature.
-2. The coordinator challenges `GET /v1/status` to prove that the registering key
+5. The coordinator challenges `GET /v1/status` to prove that the registering key
    controls the advertised endpoint.
-3. The coordinator returns a signed model/stage assignment.
-4. The provider persists and verifies the assignment, then signs
+6. The coordinator pins the advertised provider TLS certificate and returns a
+   signed model/stage assignment.
+7. The provider persists and verifies the assignment, then signs
    `POST /api/nodes/{id}/ready`.
-5. Signed heartbeats renew a 45-second routing lease and return the current CTX
+8. Signed heartbeats renew a 45-second routing lease and return the current CTX
    balance.
+
+Only the controller client certificate can cross the provider's tensor tunnel.
+Provider certificates have server-auth usage only; peers cannot call each
+other. Plaintext clients and CA-valid identities with the wrong certificate
+fingerprint are closed before a loopback RPC connection is created.
 
 Every `/v1/execute` or `/v1/attest` request carries a unique challenge and a
 coordinator-signed work ticket bound to the provider, assignment, model,

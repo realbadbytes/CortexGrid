@@ -18,6 +18,9 @@ READY_DOMAIN = "cortex-node-ready-v1"
 HEARTBEAT_DOMAIN = "cortex-node-heartbeat-v1"
 LEAVE_DOMAIN = "cortex-node-leave-v1"
 WORK_TICKET_DOMAIN = "cortex-work-ticket-v1"
+RPC_TRUST_DOMAIN = "cortex-rpc-trust-v1"
+RPC_CERT_REQUEST_DOMAIN = "cortex-rpc-cert-request-v1"
+RPC_CERT_RESPONSE_DOMAIN = "cortex-rpc-cert-response-v1"
 MAX_CLOCK_SKEW_MS = 5 * 60 * 1_000
 
 

@@ -8,6 +8,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
+
+from .tls_rpc import TlsRpcClient
 
 
 class DistributedModelRuntime:
@@ -22,6 +25,9 @@ class DistributedModelRuntime:
         node_ids: list[str],
         data_dir: Path,
         base_port: int | None = None,
+        tls_client_certificate: Path | None = None,
+        tls_client_key: Path | None = None,
+        tls_ca_certificate: Path | None = None,
     ):
         self.model_path = model_path
         self.rpc_binary = rpc_binary
@@ -42,6 +48,11 @@ class DistributedModelRuntime:
             for index, node_id in enumerate(self.node_ids)
         }
         self._remote_endpoints: dict[str, str] = {}
+        self._remote_certificate_fingerprints: dict[str, str] = {}
+        self._remote_proxies: dict[str, TlsRpcClient] = {}
+        self.tls_client_certificate = tls_client_certificate
+        self.tls_client_key = tls_client_key
+        self.tls_ca_certificate = tls_ca_certificate
         self._rpc_processes: dict[str, subprocess.Popen[bytes]] = {}
         self._rpc_logs: dict[str, object] = {}
         self._gateway: subprocess.Popen[bytes] | None = None
@@ -116,13 +127,65 @@ class DistributedModelRuntime:
         self._rpc_logs[node_id] = log
         self._wait_for_port(port, process)
 
-    def register_remote(self, node_id: str, rpc_endpoint: str) -> None:
+    def register_remote(
+        self,
+        node_id: str,
+        rpc_endpoint: str,
+        *,
+        certificate_fingerprint: str,
+    ) -> None:
         if node_id in self._node_ports:
             raise ValueError("a local model participant already uses this node id")
+        current = self._remote_proxies.pop(node_id, None)
+        if current is not None:
+            current.close()
         self._remote_endpoints[node_id] = rpc_endpoint
+        self._remote_certificate_fingerprints[node_id] = certificate_fingerprint
 
     def unregister_remote(self, node_id: str) -> None:
         self._remote_endpoints.pop(node_id, None)
+        self._remote_certificate_fingerprints.pop(node_id, None)
+        proxy = self._remote_proxies.pop(node_id, None)
+        if proxy is not None:
+            proxy.close()
+
+    @staticmethod
+    def _parse_endpoint(endpoint: str) -> tuple[str, int]:
+        parsed = urlparse(f"//{endpoint}")
+        if not parsed.hostname or parsed.port is None:
+            raise ValueError("remote RPC endpoint must use host:port")
+        return parsed.hostname, parsed.port
+
+    def _secure_remote_endpoint(self, node_id: str) -> str:
+        proxy = self._remote_proxies.get(node_id)
+        if proxy is None:
+            if not all(
+                path is not None and path.is_file()
+                for path in (
+                    self.tls_client_certificate,
+                    self.tls_client_key,
+                    self.tls_ca_certificate,
+                )
+            ):
+                raise RuntimeError("controller RPC TLS identity is unavailable")
+            host, port = self._parse_endpoint(self._remote_endpoints[node_id])
+            fingerprint = self._remote_certificate_fingerprints.get(node_id, "")
+            if len(fingerprint) != 64:
+                raise RuntimeError("provider RPC certificate is not pinned")
+            proxy = TlsRpcClient(
+                target_host=host,
+                target_port=port,
+                expected_server_fingerprint=fingerprint,
+                certificate_path=self.tls_client_certificate,
+                key_path=self.tls_client_key,
+                ca_certificate_path=self.tls_ca_certificate,
+            )
+            self._remote_proxies[node_id] = proxy
+        return proxy.endpoint
+
+    def probe_remote(self, node_id: str) -> None:
+        self._secure_remote_endpoint(node_id)
+        self._remote_proxies[node_id].probe()
 
     def _health(self) -> bool:
         try:
@@ -171,8 +234,10 @@ class DistributedModelRuntime:
         for node_id in route:
             self._start_rpc(node_id)
         endpoints = ",".join(
-            self._remote_endpoints.get(
-                node_id, f"127.0.0.1:{self._node_ports.get(node_id, 0)}"
+            (
+                self._secure_remote_endpoint(node_id)
+                if node_id in self._remote_endpoints
+                else f"127.0.0.1:{self._node_ports.get(node_id, 0)}"
             )
             for node_id in route
         )
@@ -211,7 +276,10 @@ class DistributedModelRuntime:
             stdout=self._gateway_log,
             stderr=subprocess.STDOUT,
         )
-        deadline = time.monotonic() + 30
+        startup_timeout = (
+            120 if any(node_id in self._remote_endpoints for node_id in route) else 30
+        )
+        deadline = time.monotonic() + startup_timeout
         while time.monotonic() < deadline:
             if self._gateway.poll() is not None:
                 raise RuntimeError(
@@ -222,7 +290,10 @@ class DistributedModelRuntime:
                 return
             time.sleep(0.2)
         self._stop_gateway()
-        raise TimeoutError("distributed model gateway did not become healthy")
+        raise TimeoutError(
+            "distributed model gateway did not become healthy within "
+            f"{startup_timeout} seconds"
+        )
 
     def generate(
         self, *, prompt: str, route: list[str], max_tokens: int = 48
@@ -269,7 +340,7 @@ class DistributedModelRuntime:
             "available": True,
             "active": self._health() if self._gateway is not None else False,
             "engine": "llama.cpp",
-            "transport": "private-rpc-tcp",
+            "transport": "controller-mtls-rpc",
             "modelFile": self.model_path.name,
             "activeRoute": list(self._active_route),
             "participants": [
@@ -279,6 +350,10 @@ class DistributedModelRuntime:
                         node_id, f"127.0.0.1:{self._node_ports.get(node_id, 0)}"
                     ),
                     "remote": node_id in self._remote_endpoints,
+                    "secured": (
+                        node_id not in self._remote_endpoints
+                        or node_id in self._remote_certificate_fingerprints
+                    ),
                     "resident": (
                         (
                             node_id in self._remote_endpoints
@@ -299,6 +374,9 @@ class DistributedModelRuntime:
             return
         self._closed = True
         self._stop_gateway()
+        for proxy in self._remote_proxies.values():
+            proxy.close()
+        self._remote_proxies.clear()
         for process in self._rpc_processes.values():
             if process.poll() is None:
                 process.terminate()

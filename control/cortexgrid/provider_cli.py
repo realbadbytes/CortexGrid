@@ -61,10 +61,11 @@ def format_status(status: dict) -> str:
     )
     state = "joined" if status.get("joined") else "left"
     rpc_state = "online" if status.get("rpcOnline") else "offline"
+    rpc_transport = status.get("rpcTransport", "unknown")
     return (
         f"{status['name']} ({status['nodeId']}) · {state}\n"
         f"Operator: {status['operator']} · Region: {status['region']}\n"
-        f"RPC: {rpc_state} at {status['rpcEndpoint']}\n"
+        f"RPC: {rpc_state} at {status['rpcEndpoint']} · {rpc_transport}\n"
         f"Model: {model.get('name', 'unassigned')} "
         f"{model.get('version', '')}\n"
         f"Stage: {shard.get('index', 'n/a')} · Layers: {layer_text} · "

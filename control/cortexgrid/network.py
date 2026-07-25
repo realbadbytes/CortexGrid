@@ -4,7 +4,6 @@ import math
 import os
 import re
 import secrets
-import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -32,6 +31,9 @@ from .join_protocol import (
     LEAVE_DOMAIN,
     READY_DOMAIN,
     REGISTRATION_DOMAIN,
+    RPC_CERT_REQUEST_DOMAIN,
+    RPC_CERT_RESPONSE_DOMAIN,
+    RPC_TRUST_DOMAIN,
     STATUS_DOMAIN,
     now_ms,
     request_json,
@@ -40,7 +42,18 @@ from .join_protocol import (
     verify_payload,
 )
 from .model_runtime import DistributedModelRuntime
+from .model_profiles import (
+    capacity_requirements,
+    five_tb_model_manifest,
+    load_model_manifest,
+    validate_model_manifest,
+)
 from .remote_worker import RemoteWorker
+from .tls_rpc import (
+    RPC_TLS_PROTOCOL,
+    ControllerTlsAuthority,
+    certificate_fingerprint,
+)
 from .util import merkle_root, sha256, sha256_file, utc_now
 from .wallet import Wallet, address_from_public_key
 
@@ -136,6 +149,8 @@ class ComputeNode:
     shards: list[dict] = field(default_factory=list)
     remote: bool = False
     rpc_endpoint: str | None = None
+    rpc_transport: str = "local-loopback"
+    rpc_certificate_fingerprint: str | None = None
     attestation_endpoint: str | None = None
     assignment: dict | None = None
     last_heartbeat_ms: int | None = None
@@ -143,6 +158,13 @@ class ComputeNode:
     @property
     def allocated_memory_gib(self) -> float:
         return sum(shard["sizeGiB"] for shard in self.shards)
+
+    @property
+    def reserved_memory_gib(self) -> float:
+        return sum(
+            float(shard.get("minimumMemoryGiB", shard["sizeGiB"]))
+            for shard in self.shards
+        )
 
     def hosts(self, model_id: str, shard_index: int) -> bool:
         return any(
@@ -159,7 +181,8 @@ class ComputeNode:
             "status": self.status,
             "memoryGiB": self.memory_gib,
             "allocatedMemoryGiB": self.allocated_memory_gib,
-            "freeMemoryGiB": self.memory_gib - self.allocated_memory_gib,
+            "reservedMemoryGiB": self.reserved_memory_gib,
+            "freeMemoryGiB": self.memory_gib - self.reserved_memory_gib,
             "networkLatencyMs": self.network_latency_ms,
             "completedJobs": self.completed_jobs,
             "failedProofs": self.failed_proofs,
@@ -171,6 +194,8 @@ class ComputeNode:
             "accent": self.accent,
             "remote": self.remote,
             "rpcEndpoint": self.rpc_endpoint,
+            "rpcTransport": self.rpc_transport,
+            "rpcCertificateFingerprint": self.rpc_certificate_fingerprint,
             "attestationEndpoint": self.attestation_endpoint,
             "lastHeartbeatMs": self.last_heartbeat_ms,
             "assignment": (
@@ -183,6 +208,11 @@ class ComputeNode:
                     "modelId": shard["modelId"],
                     "index": shard["index"],
                     "sizeGiB": shard["sizeGiB"],
+                    "sizeBytes": shard.get("sizeBytes"),
+                    "minimumMemoryGiB": shard.get(
+                        "minimumMemoryGiB", shard["sizeGiB"]
+                    ),
+                    "layerRange": shard.get("layerRange"),
                     "weightsDigest": shard["weightsDigest"],
                 }
                 for shard in self.shards
@@ -199,6 +229,8 @@ class CortexNetwork:
         executor_path: Path | None = None,
         data_dir: Path | None = None,
         real_model: bool | None = None,
+        model_profile: str | None = None,
+        model_manifest_path: Path | None = None,
     ):
         project_root = Path(__file__).resolve().parents[2]
         self.executor_path = executor_path or Path(
@@ -227,10 +259,22 @@ class CortexNetwork:
                 project_root / "build" / "llama" / "bin" / "llama-server",
             )
         )
+        configured_manifest = model_manifest_path or (
+            Path(os.environ["CORTEX_MODEL_MANIFEST"])
+            if os.environ.get("CORTEX_MODEL_MANIFEST")
+            else None
+        )
+        configured_profile = (
+            model_profile
+            or os.environ.get("CORTEX_MODEL_PROFILE")
+            or ""
+        ).lower()
         runtime_available = DistributedModelRuntime.is_available(
             self.model_path, self.rpc_binary, self.model_server_binary
         )
-        if real_model is None:
+        if configured_manifest is not None or configured_profile:
+            real_model = False
+        elif real_model is None:
             runtime_setting = os.environ.get("CORTEX_REAL_MODEL", "auto").lower()
             real_model = runtime_available if runtime_setting == "auto" else (
                 runtime_setting in {"1", "true", "on", "yes"}
@@ -242,18 +286,31 @@ class CortexNetwork:
             )
 
         self.real_model_enabled = bool(real_model)
-        self.model = (
-            _real_model_manifest(self.model_path)
-            if self.real_model_enabled
-            else _synthetic_model_manifest()
-        )
+        if configured_manifest is not None:
+            self.model = load_model_manifest(configured_manifest)
+            self.model_profile = f"manifest:{configured_manifest.name}"
+        elif configured_profile in {"5tb", "cortex-5tb", "cortex-5tb-theoretical"}:
+            self.model = validate_model_manifest(five_tb_model_manifest())
+            self.model_profile = "5tb"
+        elif configured_profile:
+            raise ValueError(f"unknown model profile: {configured_profile}")
+        else:
+            self.model = (
+                _real_model_manifest(self.model_path)
+                if self.real_model_enabled
+                else _synthetic_model_manifest()
+            )
+            self.model_profile = "real" if self.real_model_enabled else "synthetic"
         self.demo_wallet = Wallet.load_or_create(self.data_dir / "demo_wallet.json")
         self.coordinator_wallet = Wallet.load_or_create(
             self.data_dir / "coordinator_wallet.json"
         )
+        self.rpc_authority = ControllerTlsAuthority(
+            self.data_dir / "rpc-authority"
+        )
         chain_filename = (
             f"chain-{self.model['id']}.jsonl"
-            if self.real_model_enabled
+            if self.real_model_enabled or self.model_profile != "synthetic"
             else "chain.jsonl"
         )
         self.chain = Blockchain(
@@ -278,6 +335,9 @@ class CortexNetwork:
                     server_binary=self.model_server_binary,
                     node_ids=list(self.nodes),
                     data_dir=self.data_dir / "runtime",
+                    tls_client_certificate=self.rpc_authority.client_certificate_path,
+                    tls_client_key=self.rpc_authority.client_key_path,
+                    tls_ca_certificate=self.rpc_authority.ca_certificate_path,
                 )
         except Exception:
             self.close()
@@ -313,9 +373,18 @@ class CortexNetwork:
                 for replica in range(self.model["replicationFactor"])
             ]
             for replica_index in replica_indices:
-                nodes[replica_index].shards.append(
-                    {"modelId": self.model["id"], **shard}
+                node = nodes[replica_index]
+                required_memory = float(
+                    shard.get("minimumMemoryGiB", shard["sizeGiB"])
                 )
+                if (
+                    not node.hosts(self.model["id"], shard["index"])
+                    and node.memory_gib - node.reserved_memory_gib
+                    >= required_memory
+                ):
+                    node.shards.append(
+                        {"modelId": self.model["id"], **shard}
+                    )
 
     def _event(self, kind: str, title: str, detail: str, **metadata: object) -> None:
         self.events.insert(
@@ -466,6 +535,74 @@ class CortexNetwork:
             )
         return normalized
 
+    def rpc_trust_bundle(self) -> dict:
+        bundle = {
+            "protocol": RPC_TLS_PROTOCOL,
+            "coordinatorPublicKey": self.coordinator_wallet.public_key_hex,
+            "caCertificate": self.rpc_authority.ca_pem,
+            "caCertificateFingerprint": certificate_fingerprint(
+                self.rpc_authority.ca_pem
+            ),
+            "controllerClientCertificateFingerprint": (
+                self.rpc_authority.client_fingerprint
+            ),
+        }
+        return {
+            "trust": bundle,
+            "signature": sign_payload(
+                self.coordinator_wallet, RPC_TRUST_DOMAIN, bundle
+            ),
+        }
+
+    def issue_rpc_certificate(self, envelope: dict) -> dict:
+        request = envelope["request"]
+        if request.get("protocol") != RPC_TLS_PROTOCOL:
+            raise ValueError("unsupported RPC TLS protocol")
+        node_id = request.get("nodeId")
+        if not isinstance(node_id, str) or not NODE_ID_PATTERN.fullmatch(node_id):
+            raise ValueError("RPC certificate nodeId is invalid")
+        public_key = self._validate_public_key(request.get("publicKey"))
+        advertise_host = self._bounded_text(
+            request.get("advertiseHost"), "advertiseHost", maximum=253
+        )
+        csr_pem = request.get("csr")
+        if not isinstance(csr_pem, str) or len(csr_pem) > 32_000:
+            raise ValueError("RPC certificate request is invalid")
+        require_fresh(request.get("timestampMs"))
+        if not isinstance(request.get("nonce"), str) or len(request["nonce"]) < 16:
+            raise ValueError("RPC certificate nonce is invalid")
+        if not verify_payload(
+            public_key,
+            RPC_CERT_REQUEST_DOMAIN,
+            request,
+            envelope["signature"],
+        ):
+            raise ValueError("RPC certificate request signature is invalid")
+        certificate = self.rpc_authority.issue_server_certificate(
+            csr_pem=csr_pem,
+            node_id=node_id,
+            advertise_host=advertise_host,
+        )
+        response = {
+            "protocol": RPC_TLS_PROTOCOL,
+            "nodeId": node_id,
+            "certificate": certificate,
+            "certificateFingerprint": certificate_fingerprint(certificate),
+            "caCertificate": self.rpc_authority.ca_pem,
+            "caCertificateFingerprint": certificate_fingerprint(
+                self.rpc_authority.ca_pem
+            ),
+            "controllerClientCertificateFingerprint": (
+                self.rpc_authority.client_fingerprint
+            ),
+        }
+        return {
+            "response": response,
+            "signature": sign_payload(
+                self.coordinator_wallet, RPC_CERT_RESPONSE_DOMAIN, response
+            ),
+        }
+
     def _probe_remote_identity(
         self,
         *,
@@ -473,6 +610,8 @@ class CortexNetwork:
         public_key: str,
         rpc_endpoint: str,
         attestation_endpoint: str,
+        rpc_transport: str | None = None,
+        rpc_certificate_fingerprint: str | None = None,
         assignment_id: str | None = None,
     ) -> int:
         challenge = secrets.token_hex(16)
@@ -490,6 +629,17 @@ class CortexNetwork:
             or status.get("challenge") != challenge
         ):
             raise ValueError("node status response does not match its registration")
+        if (
+            rpc_transport is not None
+            and status.get("rpcTransport") != rpc_transport
+        ):
+            raise ValueError("node RPC transport does not match its registration")
+        if (
+            rpc_certificate_fingerprint is not None
+            and status.get("rpcCertificateFingerprint")
+            != rpc_certificate_fingerprint
+        ):
+            raise ValueError("node RPC certificate does not match its registration")
         if assignment_id is not None and status.get("assignmentId") != assignment_id:
             raise ValueError("node has not installed the signed assignment")
         if not verify_payload(
@@ -502,11 +652,13 @@ class CortexNetwork:
         compatible = [
             shard
             for shard in self.model["shards"]
-            if float(shard["sizeGiB"]) <= memory_gib
+            if float(shard.get("minimumMemoryGiB", shard["sizeGiB"]))
+            <= memory_gib
         ]
         if not compatible:
             minimum = min(
-                float(shard["sizeGiB"]) for shard in self.model["shards"]
+                float(shard.get("minimumMemoryGiB", shard["sizeGiB"]))
+                for shard in self.model["shards"]
             )
             raise ValueError(
                 f"node needs at least {minimum} GiB for an available stage"
@@ -514,6 +666,11 @@ class CortexNetwork:
         return min(
             compatible,
             key=lambda shard: (
+                sum(
+                    node.status in {"online", "assigned"}
+                    and node.hosts(self.model["id"], shard["index"])
+                    for node in self.nodes.values()
+                ),
                 sum(
                     node.hosts(self.model["id"], shard["index"])
                     for node in self.nodes.values()
@@ -539,6 +696,22 @@ class CortexNetwork:
         rpc_host, rpc_port, rpc_endpoint = self._parse_rpc_endpoint(
             registration.get("rpcEndpoint")
         )
+        rpc_transport = registration.get("rpcTransport")
+        rpc_certificate_fingerprint = registration.get(
+            "rpcCertificateFingerprint"
+        )
+        if rpc_transport not in {RPC_TLS_PROTOCOL, "none"}:
+            raise ValueError("remote RPC transport must use controller mTLS")
+        if self.real_model_enabled and rpc_transport != RPC_TLS_PROTOCOL:
+            raise ValueError("real model providers require controller mTLS")
+        if rpc_transport == RPC_TLS_PROTOCOL:
+            if (
+                not isinstance(rpc_certificate_fingerprint, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", rpc_certificate_fingerprint)
+            ):
+                raise ValueError("provider RPC certificate fingerprint is invalid")
+        else:
+            rpc_certificate_fingerprint = None
         attestation_endpoint = self._validate_attestation_endpoint(
             registration.get("attestationEndpoint")
         )
@@ -581,6 +754,8 @@ class CortexNetwork:
             public_key=public_key,
             rpc_endpoint=rpc_endpoint,
             attestation_endpoint=attestation_endpoint,
+            rpc_transport=rpc_transport,
+            rpc_certificate_fingerprint=rpc_certificate_fingerprint,
         )
 
         with self._lock:
@@ -610,9 +785,12 @@ class CortexNetwork:
                     **self._choose_remote_shard(memory_gib),
                 }
             )
-            if memory_gib < float(shard["sizeGiB"]):
+            required_memory = float(
+                shard.get("minimumMemoryGiB", shard["sizeGiB"])
+            )
+            if memory_gib < required_memory:
                 raise ValueError(
-                    f"node needs at least {shard['sizeGiB']} GiB for this stage"
+                    f"node needs at least {required_memory} GiB for this stage"
                 )
             assignment_id = sha256(
                 f"{JOIN_PROTOCOL}|{node_id}|{public_key}|{self.model['version']}|"
@@ -638,10 +816,13 @@ class CortexNetwork:
                     key: shard[key]
                     for key in (
                         "index",
+                        "sizeBytes",
                         "sizeGiB",
+                        "minimumMemoryGiB",
                         "computeUnits",
                         "weightsDigest",
                         "layerRange",
+                        "artifact",
                     )
                     if key in shard
                 },
@@ -652,6 +833,13 @@ class CortexNetwork:
                         else "deterministic-stage"
                     ),
                     "rpcEndpoint": rpc_endpoint,
+                    "rpcTransport": rpc_transport,
+                    "rpcCertificateFingerprint": (
+                        rpc_certificate_fingerprint
+                    ),
+                    "controllerClientCertificateFingerprint": (
+                        self.rpc_authority.client_fingerprint
+                    ),
                     "tensorCache": "provider-owned",
                 },
                 "economics": {
@@ -690,6 +878,8 @@ class CortexNetwork:
                 shards=[{"modelId": self.model["id"], **shard}],
                 remote=True,
                 rpc_endpoint=rpc_endpoint,
+                rpc_transport=rpc_transport,
+                rpc_certificate_fingerprint=rpc_certificate_fingerprint,
                 attestation_endpoint=attestation_endpoint,
                 assignment={
                     "assignment": assignment,
@@ -698,7 +888,11 @@ class CortexNetwork:
             )
             self.nodes[node_id] = node
             if self.model_runtime is not None:
-                self.model_runtime.register_remote(node_id, rpc_endpoint)
+                self.model_runtime.register_remote(
+                    node_id,
+                    rpc_endpoint,
+                    certificate_fingerprint=rpc_certificate_fingerprint or "",
+                )
             self._event(
                 "node",
                 f"{name} registered",
@@ -746,18 +940,18 @@ class CortexNetwork:
                 public_key=node.worker.public_key,
                 rpc_endpoint=node.rpc_endpoint or "",
                 attestation_endpoint=node.attestation_endpoint or "",
+                rpc_transport=node.rpc_transport,
+                rpc_certificate_fingerprint=node.rpc_certificate_fingerprint,
                 assignment_id=assignment["assignmentId"],
             )
             if self.real_model_enabled:
-                rpc_host, rpc_port, _ = self._parse_rpc_endpoint(
-                    node.rpc_endpoint
-                )
                 try:
-                    with socket.create_connection((rpc_host, rpc_port), timeout=2):
-                        pass
-                except OSError as error:
+                    if self.model_runtime is None:
+                        raise RuntimeError("model runtime is unavailable")
+                    self.model_runtime.probe_remote(node.id)
+                except (OSError, RuntimeError) as error:
                     raise RuntimeError(
-                        "assigned llama.cpp RPC endpoint is not reachable"
+                        "assigned llama.cpp RPC mTLS endpoint rejected the controller"
                     ) from error
             node.status = "online"
             node.last_heartbeat_ms = now_ms()
@@ -1061,6 +1255,12 @@ class CortexNetwork:
             raise ValueError(f"unknown model: {model_id}")
 
         with self._lock:
+            coverage = self._model_coverage()
+            if not coverage["readyForInference"]:
+                raise RuntimeError(
+                    f"model is awaiting {coverage['missingStageCount']} "
+                    "unhosted stage(s); add compatible providers before inference"
+                )
             inference_id = f"inf_{secrets.token_hex(8)}"
             started = time.perf_counter()
             input_digest = sha256(
@@ -1343,36 +1543,125 @@ class CortexNetwork:
             )
             return node.snapshot(self.chain)
 
+    def _model_coverage(self) -> dict:
+        placements = {}
+        online_placements = {}
+        for shard in self.model["shards"]:
+            shard_index = int(shard["index"])
+            placements[shard_index] = [
+                node.id
+                for node in self.nodes.values()
+                if node.hosts(self.model["id"], shard_index)
+            ]
+            online_placements[shard_index] = [
+                node.id
+                for node in self.nodes.values()
+                if node.status == "online"
+                and node.hosts(self.model["id"], shard_index)
+            ]
+        missing = [
+            shard_index
+            for shard_index, node_ids in online_placements.items()
+            if not node_ids
+        ]
+        target_replicas = int(self.model["replicationFactor"])
+        under_replicated = [
+            shard_index
+            for shard_index, node_ids in online_placements.items()
+            if len(node_ids) < target_replicas
+        ]
+        return {
+            "readyForInference": not missing,
+            "readyStageCount": len(online_placements) - len(missing),
+            "stageCount": len(online_placements),
+            "missingStageCount": len(missing),
+            "missingStages": missing,
+            "targetReplication": target_replicas,
+            "readyAtTargetReplication": not under_replicated,
+            "underReplicatedStageCount": len(under_replicated),
+            "underReplicatedStages": under_replicated,
+            "placementCount": sum(len(value) for value in placements.values()),
+            "onlinePlacementCount": sum(
+                len(value) for value in online_placements.values()
+            ),
+            "placements": placements,
+            "onlinePlacements": online_placements,
+        }
+
     def public_model(self) -> dict:
+        coverage = self._model_coverage()
         placements = []
         for shard in self.model["shards"]:
+            shard_index = int(shard["index"])
             placements.append(
                 {
                     **shard,
-                    "replicas": [
-                        node.id
-                        for node in self.nodes.values()
-                        if node.hosts(self.model["id"], shard["index"])
-                    ],
+                    "replicas": coverage["placements"][shard_index],
+                    "onlineReplicas": coverage["onlinePlacements"][shard_index],
                 }
             )
+        model_size_bytes = int(
+            self.model.get(
+                "modelSizeBytes",
+                round(
+                    sum(float(shard["sizeGiB"]) for shard in self.model["shards"])
+                    * 1024**3
+                ),
+            )
+        )
         return {
             **{
                 key: value
                 for key, value in self.model.items()
-                if key != "shards"
+                if key not in {"shards", "status"}
             },
-            "modelMemoryGiB": self.model["shardCount"]
-            * self.model["shardSizeGiB"],
+            "profile": self.model_profile,
+            "status": (
+                "ready"
+                if coverage["readyForInference"]
+                else "awaiting-capacity"
+            ),
+            "modelSizeBytes": model_size_bytes,
+            "modelMemoryGiB": round(model_size_bytes / 1024**3, 6),
             "replicatedMemoryGiB": round(
                 sum(node.allocated_memory_gib for node in self.nodes.values()), 6
             ),
+            "reservedMemoryGiB": round(
+                sum(node.reserved_memory_gib for node in self.nodes.values()), 6
+            ),
+            "capacityRequirements": capacity_requirements(
+                validate_model_manifest(
+                    {
+                        **self.model,
+                        "shards": [
+                            dict(shard) for shard in self.model["shards"]
+                        ],
+                    }
+                )
+            ),
+            "coverage": {
+                key: value
+                for key, value in coverage.items()
+                if key not in {"placements", "onlinePlacements"}
+            },
             "placements": placements,
+        }
+
+    def model_capacity(self) -> dict:
+        model = self.public_model()
+        return {
+            "modelId": model["id"],
+            "profile": model["profile"],
+            "status": model["status"],
+            "artifactsAvailable": model.get("artifactsAvailable", True),
+            "requirements": model["capacityRequirements"],
+            "coverage": model["coverage"],
         }
 
     def snapshot(self) -> dict:
         with self._lock:
             self._expire_remote_nodes()
+            model = self.public_model()
             node_snapshots = [
                 node.snapshot(self.chain) for node in self.nodes.values()
             ]
@@ -1387,7 +1676,10 @@ class CortexNetwork:
                 "coordinatorPublicKey": self.coordinator_wallet.public_key_hex,
                 "status": (
                     "healthy"
-                    if len(online) == len(node_snapshots)
+                    if (
+                        len(online) == len(node_snapshots)
+                        and model["coverage"]["readyForInference"]
+                    )
                     else "degraded"
                 ),
                 "metrics": {
@@ -1399,7 +1691,12 @@ class CortexNetwork:
                     "allocatedMemoryGiB": sum(
                         node["allocatedMemoryGiB"] for node in node_snapshots
                     ),
-                    "modelsReady": 1,
+                    "reservedMemoryGiB": sum(
+                        node["reservedMemoryGiB"] for node in node_snapshots
+                    ),
+                    "modelsReady": int(
+                        model["coverage"]["readyForInference"]
+                    ),
                     "inferencesFinalized": len(inference_blocks),
                     "verifiedReceipts": sum(
                         len(block["payload"]["proof"]["receipts"])
@@ -1407,7 +1704,7 @@ class CortexNetwork:
                     ),
                     "chainHeight": len(self.chain.blocks) - 1,
                 },
-                "model": self.public_model(),
+                "model": model,
                 "modelRuntime": (
                     self.model_runtime.snapshot()
                     if self.model_runtime is not None

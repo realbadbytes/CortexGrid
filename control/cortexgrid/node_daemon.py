@@ -26,6 +26,9 @@ from .join_protocol import (
     LEAVE_DOMAIN,
     READY_DOMAIN,
     REGISTRATION_DOMAIN,
+    RPC_CERT_REQUEST_DOMAIN,
+    RPC_CERT_RESPONSE_DOMAIN,
+    RPC_TRUST_DOMAIN,
     STATUS_DOMAIN,
     WORK_TICKET_DOMAIN,
     now_ms,
@@ -35,6 +38,12 @@ from .join_protocol import (
 )
 from .util import canonical_json, utc_now
 from .wallet import Wallet, address_from_public_key
+from .tls_rpc import (
+    RPC_TLS_PROTOCOL,
+    TlsRpcServer,
+    certificate_fingerprint,
+    create_provider_csr,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -100,6 +109,11 @@ class ProviderNode:
         self.coordinator_public_key = (
             coordinator_public_key or stored_coordinator_key
         )
+        if self.rpc_binary is not None and not self.coordinator_public_key:
+            raise RuntimeError(
+                "secure model RPC requires the coordinator public key on first "
+                "join; obtain it out of band and use --coordinator-public-key"
+            )
         self.balance = 0.0
         self.joined = False
         self.last_heartbeat_at: str | None = None
@@ -107,6 +121,10 @@ class ProviderNode:
         self.completed_jobs = 0
         self.chain_height = 0
         self._rpc_process: subprocess.Popen[bytes] | None = None
+        self._rpc_tls_server: TlsRpcServer | None = None
+        self._rpc_internal_port: int | None = None
+        self.rpc_certificate_fingerprint: str | None = None
+        self._rpc_tls_paths: dict[str, Path | str] = {}
         self._rpc_log: object | None = None
         self._http_server: ProviderHttpServer | None = None
         self._http_thread: threading.Thread | None = None
@@ -169,6 +187,95 @@ class ProviderNode:
                 time.sleep(0.1)
         raise TimeoutError("llama.cpp RPC server did not become reachable")
 
+    def _prepare_rpc_tls(self) -> None:
+        trust_envelope = request_json(f"{self.coordinator_url}/api/rpc/trust")
+        trust = trust_envelope["trust"]
+        coordinator_public_key = trust["coordinatorPublicKey"]
+        if (
+            self.coordinator_public_key
+            and coordinator_public_key != self.coordinator_public_key
+        ):
+            raise RuntimeError("RPC trust bundle is not from the pinned coordinator")
+        if not verify_payload(
+            coordinator_public_key,
+            RPC_TRUST_DOMAIN,
+            trust,
+            trust_envelope["signature"],
+        ):
+            raise RuntimeError("RPC trust bundle signature is invalid")
+        if trust.get("protocol") != RPC_TLS_PROTOCOL:
+            raise RuntimeError("coordinator does not support secure model RPC")
+        if certificate_fingerprint(trust["caCertificate"]) != trust.get(
+            "caCertificateFingerprint"
+        ):
+            raise RuntimeError("RPC authority certificate fingerprint is invalid")
+
+        tls_dir = self.data_dir / "rpc-tls"
+        key_path = tls_dir / "provider-key.pem"
+        csr = create_provider_csr(
+            key_path=key_path,
+            node_id=self.node_id,
+            advertise_host=self.advertise_host,
+        )
+        certificate_request = {
+            "protocol": RPC_TLS_PROTOCOL,
+            "nodeId": self.node_id,
+            "publicKey": self.worker.public_key,
+            "advertiseHost": self.advertise_host,
+            "csr": csr,
+            "timestampMs": now_ms(),
+            "nonce": secrets.token_hex(16),
+        }
+        certificate_envelope = request_json(
+            f"{self.coordinator_url}/api/rpc/certificates",
+            payload={
+                "request": certificate_request,
+                "signature": sign_payload(
+                    self.wallet,
+                    RPC_CERT_REQUEST_DOMAIN,
+                    certificate_request,
+                ),
+            },
+        )
+        response = certificate_envelope["response"]
+        if not verify_payload(
+            coordinator_public_key,
+            RPC_CERT_RESPONSE_DOMAIN,
+            response,
+            certificate_envelope["signature"],
+        ):
+            raise RuntimeError("RPC certificate response signature is invalid")
+        if (
+            response.get("protocol") != RPC_TLS_PROTOCOL
+            or response.get("nodeId") != self.node_id
+            or response.get("caCertificateFingerprint")
+            != trust["caCertificateFingerprint"]
+            or response.get("controllerClientCertificateFingerprint")
+            != trust["controllerClientCertificateFingerprint"]
+            or certificate_fingerprint(response["certificate"])
+            != response.get("certificateFingerprint")
+        ):
+            raise RuntimeError("RPC certificate response does not match its request")
+        tls_dir.mkdir(parents=True, exist_ok=True)
+        certificate_path = tls_dir / "provider-certificate.pem"
+        ca_path = tls_dir / "controller-ca.pem"
+        certificate_path.write_text(
+            response["certificate"], encoding="utf-8"
+        )
+        ca_path.write_text(response["caCertificate"], encoding="utf-8")
+        certificate_path.chmod(0o644)
+        ca_path.chmod(0o644)
+        self.coordinator_public_key = coordinator_public_key
+        self.rpc_certificate_fingerprint = response["certificateFingerprint"]
+        self._rpc_tls_paths = {
+            "certificate": certificate_path,
+            "key": key_path,
+            "ca": ca_path,
+            "controllerFingerprint": response[
+                "controllerClientCertificateFingerprint"
+            ],
+        }
+
     def _start_rpc(self) -> None:
         if self.rpc_binary is None:
             if self.rpc_port == 0:
@@ -176,8 +283,10 @@ class ProviderNode:
             return
         if not self.rpc_binary.is_file():
             raise RuntimeError(f"RPC binary does not exist: {self.rpc_binary}")
+        self._prepare_rpc_tls()
         if self.rpc_port == 0:
             self.rpc_port = self._available_port(self.listen_host)
+        self._rpc_internal_port = self._available_port("127.0.0.1")
         self._rpc_log = (self.data_dir / "rpc.log").open("ab")
         environment = os.environ.copy()
         environment["LLAMA_CACHE"] = str(self.data_dir / "tensor-cache")
@@ -185,9 +294,9 @@ class ProviderNode:
             [
                 str(self.rpc_binary),
                 "--host",
-                self.listen_host,
+                "127.0.0.1",
                 "--port",
-                str(self.rpc_port),
+                str(self._rpc_internal_port),
                 "--threads",
                 "2",
                 "--cache",
@@ -196,10 +305,22 @@ class ProviderNode:
             stderr=subprocess.STDOUT,
             env=environment,
         )
-        probe_host = (
-            "127.0.0.1" if self.listen_host in {"0.0.0.0", "::"} else self.listen_host
+        self._wait_for_port(
+            "127.0.0.1", self._rpc_internal_port, self._rpc_process
         )
-        self._wait_for_port(probe_host, self.rpc_port, self._rpc_process)
+        self._rpc_tls_server = TlsRpcServer(
+            listen_host=self.listen_host,
+            listen_port=self.rpc_port,
+            upstream_host="127.0.0.1",
+            upstream_port=self._rpc_internal_port,
+            certificate_path=self._rpc_tls_paths["certificate"],
+            key_path=self._rpc_tls_paths["key"],
+            ca_certificate_path=self._rpc_tls_paths["ca"],
+            allowed_client_fingerprint=self._rpc_tls_paths[
+                "controllerFingerprint"
+            ],
+        )
+        self.rpc_port = self._rpc_tls_server.port
 
     def start(self) -> dict:
         self._start_rpc()
@@ -233,6 +354,10 @@ class ProviderNode:
             "networkLatencyMs": self.network_latency_ms,
             "priceMicroPerWorkUnit": self.price_micro_per_work_unit,
             "rpcEndpoint": self.rpc_endpoint,
+            "rpcTransport": (
+                RPC_TLS_PROTOCOL if self.rpc_binary is not None else "none"
+            ),
+            "rpcCertificateFingerprint": self.rpc_certificate_fingerprint,
             "attestationEndpoint": self.attestation_endpoint,
             "capabilities": list(self.worker.capabilities),
             "publicKey": self.worker.public_key,
@@ -271,6 +396,12 @@ class ProviderNode:
             or assignment["publicKey"] != self.worker.public_key
             or assignment["rewardAddress"] != self.reward_address
             or assignment["runtime"]["rpcEndpoint"] != self.rpc_endpoint
+            or assignment["runtime"]["rpcTransport"]
+            != (
+                RPC_TLS_PROTOCOL if self.rpc_binary is not None else "none"
+            )
+            or assignment["runtime"]["rpcCertificateFingerprint"]
+            != self.rpc_certificate_fingerprint
             or assignment["economics"]["priceMicroPerWorkUnit"]
             != self.price_micro_per_work_unit
         ):
@@ -380,6 +511,10 @@ class ProviderNode:
             "nodeId": self.node_id,
             "publicKey": self.worker.public_key,
             "rpcEndpoint": self.rpc_endpoint,
+            "rpcTransport": (
+                RPC_TLS_PROTOCOL if self.rpc_binary is not None else "none"
+            ),
+            "rpcCertificateFingerprint": self.rpc_certificate_fingerprint,
             "challenge": challenge,
             "assignmentId": (
                 self.assignment["assignmentId"]
@@ -577,6 +712,15 @@ class ProviderNode:
             "lastHeartbeatAt": self.last_heartbeat_at,
             "lastError": self.last_error,
             "rpcEndpoint": self.rpc_endpoint,
+            "rpcTransport": (
+                RPC_TLS_PROTOCOL if self.rpc_binary is not None else "none"
+            ),
+            "rpcAuthorization": (
+                "controller-certificate-only"
+                if self.rpc_binary is not None
+                else "not-applicable"
+            ),
+            "rpcCertificateFingerprint": self.rpc_certificate_fingerprint,
             "rpcOnline": (
                 self._rpc_process is None or self._rpc_process.poll() is None
             ),
@@ -598,6 +742,9 @@ class ProviderNode:
         if self._heartbeat_thread is not None:
             self._heartbeat_thread.join(timeout=2)
             self._heartbeat_thread = None
+        if self._rpc_tls_server is not None:
+            self._rpc_tls_server.close()
+            self._rpc_tls_server = None
         if self._rpc_process is not None:
             if self._rpc_process.poll() is None:
                 self._rpc_process.terminate()

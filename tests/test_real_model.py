@@ -101,10 +101,23 @@ class RealDistributedModelTests(unittest.TestCase):
             api_port=0,
             rpc_port=0,
             heartbeat_seconds=60,
+            coordinator_public_key=(
+                self.network.coordinator_wallet.public_key_hex
+            ),
         )
         try:
             joined = provider.start()
             self.assertEqual(joined["assignment"]["shard"]["index"], 0)
+            self.assertEqual(
+                joined["assignment"]["runtime"]["rpcTransport"],
+                "cortex-rpc-mtls-v1",
+            )
+            self.assertEqual(
+                joined["assignment"]["runtime"][
+                    "controllerClientCertificateFingerprint"
+                ],
+                self.network.rpc_authority.client_fingerprint,
+            )
 
             result = self.network.run_inference(
                 "Explain why model sharding is useful in one sentence."
@@ -122,6 +135,7 @@ class RealDistributedModelTests(unittest.TestCase):
                 if item["nodeId"] == "remote-gpu-one"
             )
             self.assertTrue(participant["remote"])
+            self.assertTrue(participant["secured"])
             self.assertTrue(participant["resident"])
         finally:
             provider.close()

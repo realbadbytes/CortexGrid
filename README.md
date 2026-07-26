@@ -1,24 +1,22 @@
 # CortexGrid
 
-> **CortexGrid lets people pool RAM, VRAM, and compute to run language models
-> that would be too large or expensive for any participant to run alone.**
-> Every machine increases model capacity or throughput. Every machine that
-> completes verified inference work earns CTX.
+> **CortexGrid pools compute from participants worldwide so the network can
+> support AI models of any size—models no participant could run alone.**
+> As worldwide RAM, VRAM, and compute grow, the network can host more model
+> stages, add replicas, and serve more inference. Every machine that completes
+> verified inference work earns CTX.
 
 CortexGrid uses a simple centralized coordinator: Python assigns model stages,
 routes inference, verifies work, and finalizes the CTX ledger. C++/CUDA and
 llama.cpp perform model execution on participant hardware.
 
-```text
-                         signed stage assignments
-                    ┌────────── Coordinator ──────────┐
-model weights ─────▶│ layers 0–14  ─▶ provider A     │
-                    │ layers 15–29 ─▶ provider B     │
-                    │ replicas      ─▶ provider C…    │
-                    └─────────────────────────────────┘
-                                      │
-CortexGrid Chat ─▶ distributed inference ─▶ signed proof ─▶ CTX rewards
-```
+![CortexGrid N TB distributed inference architecture](docs/assets/cortexgrid-architecture.svg)
+
+An arbitrary-size model is divided into `N` ordered stages sized for available
+provider capacity. Those stages can be placed across machines and regions
+worldwide. Providers host signed assignments without gaining control
+authority; the controller remains the trust root for placement, RPC access,
+verification, and CTX settlement.
 
 ## Start the network
 
@@ -102,9 +100,10 @@ that fits. The signed assignment identifies the model version, layer range,
 memory requirement, and weights digest. llama.cpp transfers those tensors into
 the provider's RAM or VRAM and reuses its local cache.
 
-Inference runs through one provider for each stage. More aggregate memory lets
-the network place larger models; more replicas and compute increase throughput
-and fault tolerance.
+Inference runs through one provider for each ordered stage, wherever that
+provider is located. Aggregate memory determines how large a model the network
+can place; replicas, compute, and network capacity determine throughput and
+fault tolerance.
 
 ## CTX
 

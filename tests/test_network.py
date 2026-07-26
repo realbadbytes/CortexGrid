@@ -15,7 +15,6 @@ from cortexgrid.blockchain import (
 )
 from cortexgrid.economics import (
     ECONOMICS_VERSION,
-    REWARD_RATE_MICRO_PER_WORK_UNIT,
 )
 from cortexgrid.network import CortexNetwork
 from cortexgrid.wallet import Wallet
@@ -55,33 +54,43 @@ class NetworkTests(unittest.TestCase):
         accounting = result["accounting"]
         self.assertEqual(accounting["economicsVersion"], ECONOMICS_VERSION)
         self.assertEqual(accounting["endUserFee"], 0)
-        expected_issuance_micro = (
-            accounting["verifiedWorkUnits"]
-            * REWARD_RATE_MICRO_PER_WORK_UNIT
-        )
+        self.assertFalse(accounting["endUserWalletRequired"])
+        economics = self.network.chain.blocks[-1]["payload"]["economics"]
+        expected_issuance_micro = economics["emission"][
+            "requestedIssuanceMicro"
+        ]
         self.assertEqual(
             accounting["issuance"],
             expected_issuance_micro / TOKEN_UNIT,
         )
-        self.assertEqual(accounting["providerRewards"], accounting["issuance"])
-        self.assertEqual(
-            accounting["rewardRate"],
-            REWARD_RATE_MICRO_PER_WORK_UNIT / TOKEN_UNIT,
+        self.assertAlmostEqual(
+            accounting["providerRewards"],
+            accounting["providerServicePayments"] + accounting["issuance"],
+            places=6,
         )
         transactions = self.network.chain.blocks[-1]["transactions"]
-        self.assertFalse(
-            any(
-                transaction["type"]
-                in {"inference_fee", "protocol_fee", "burn"}
+        self.assertEqual(transactions[0]["type"], "inference_fee")
+        self.assertEqual(transactions[1]["type"], "protocol_fee")
+        self.assertTrue(
+            not any(
+                transaction["type"] == "burn"
                 for transaction in transactions
             )
         )
-        self.assertTrue(
-            all(
-                transaction["type"] == "provider_reward"
-                and transaction["feeAmountMicro"] == 0
-                for transaction in transactions
-            )
+        service_fee_micro = transactions[0]["amountMicro"]
+        protocol_fee_micro = transactions[1]["amountMicro"]
+        provider_fee_micro = sum(
+            transaction["feeAmountMicro"]
+            for transaction in transactions
+            if transaction["type"] == "provider_reward"
+        )
+        self.assertEqual(
+            service_fee_micro,
+            protocol_fee_micro + provider_fee_micro,
+        )
+        self.assertEqual(
+            accounting["serviceSponsorFee"],
+            service_fee_micro / TOKEN_UNIT,
         )
         issuance_micro = sum(
             transaction["issuanceAmountMicro"]
@@ -101,7 +110,6 @@ class NetworkTests(unittest.TestCase):
             self.network.chain.snapshot()["token"]["totalIssued"],
             expected_issuance_micro / TOKEN_UNIT,
         )
-        economics = self.network.chain.blocks[-1]["payload"]["economics"]
         self.assertEqual(
             economics["metering"]["meteredWorkUnits"],
             sum(economics["metering"]["providerWorkUnits"].values()),
@@ -109,9 +117,8 @@ class NetworkTests(unittest.TestCase):
         for transaction in transactions:
             if transaction["type"] == "provider_reward":
                 self.assertEqual(
-                    transaction["issuanceAmountMicro"],
-                    transaction["workUnits"]
-                    * REWARD_RATE_MICRO_PER_WORK_UNIT,
+                    transaction["feeAmountMicro"],
+                    transaction["quotedAmountMicro"],
                 )
 
     def test_replica_routing_survives_one_offline_node(self) -> None:
@@ -157,8 +164,14 @@ class NetworkTests(unittest.TestCase):
             for transaction in transactions
             if transaction["type"] == "provider_reward"
         )
+        paid_service = sum(
+            transaction["feeAmountMicro"]
+            for transaction in transactions
+            if transaction["type"] == "provider_reward"
+        )
 
         self.assertEqual(issued, 1)
+        self.assertGreater(paid_service, 0)
 
     def test_consensus_rejects_forged_reward_amount(self) -> None:
         self.network.run_inference("Create a block for tamper testing.")
@@ -170,6 +183,19 @@ class NetworkTests(unittest.TestCase):
             if transaction["type"] == "provider_reward"
         )
         reward["issuanceAmountMicro"] += 1
+        forged["hash"] = self.network.chain._block_hash(forged)
+
+        validation = self.network.chain.validate()
+
+        self.assertFalse(validation["valid"])
+        self.assertIn("settlement", validation["reason"])
+        self.network.chain.blocks[-1] = original
+
+    def test_consensus_rejects_forged_service_payment(self) -> None:
+        self.network.run_inference("Create a priced block for tamper testing.")
+        original = copy.deepcopy(self.network.chain.blocks[-1])
+        forged = self.network.chain.blocks[-1]
+        forged["transactions"][0]["amountMicro"] += 1
         forged["hash"] = self.network.chain._block_hash(forged)
 
         validation = self.network.chain.validate()

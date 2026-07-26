@@ -96,7 +96,8 @@ Every `/v1/execute` or `/v1/attest` request carries a unique challenge and a
 coordinator-signed work ticket bound to the provider, assignment, model,
 stage, input, and weight commitment. Providers reject invalid, mismatched, or
 replayed tickets. The signed assignment binds the reward address and fixed
-reward policy.
+provider service rate. Finalized work earns the quoted service payment plus any
+bootstrap match active at that inference height.
 Inference receipts remain signed by the provider's own key, and rewards are
 paid to the CTX address derived from that key.
 

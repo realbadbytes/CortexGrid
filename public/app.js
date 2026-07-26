@@ -30,6 +30,15 @@ function ctx(value, maximumFractionDigits = 6) {
   return `${number(value, maximumFractionDigits)} CTX`;
 }
 
+function rewardPolicy(chain) {
+  const service = chain.economics.service || {};
+  const bootstrap = chain.economics.bootstrap || {};
+  return (
+    `${number(service.providerSharePercent, 1)}% service revenue` +
+    ` + ${number(bootstrap.currentMatchMultiplier, 2)}× bootstrap`
+  );
+}
+
 function parameterCount(value) {
   const parameters = Number(value ?? 0);
   if (parameters >= 1e12) return `${number(parameters / 1e12, 2)}T`;
@@ -309,7 +318,6 @@ function resetChat() {
 function renderOverview(network) {
   const { chain, metrics } = network;
   const healthy = network.status === "healthy";
-  const reward = chain.economics.reward || {};
 
   setText(
     "#network-label",
@@ -322,10 +330,7 @@ function renderOverview(network) {
   $(".live-proof").classList.toggle("degraded", !healthy);
   $(".live-proof").classList.remove("offline");
 
-  setText(
-    "#reward-rate",
-    `${ctx(reward.rate, 6)} / work unit`,
-  );
+  setText("#reward-rate", rewardPolicy(chain));
 
   setText(
     "#ledger-label",
@@ -341,7 +346,6 @@ function renderOverview(network) {
 
 function renderAccounting(network) {
   const { chain } = network;
-  const reward = chain.economics.reward || {};
   setText("#detail-height", `#${chain.height}`);
   setText("#detail-hash", shortHash(chain.latestBlockHash, 24));
   $("#detail-hash").title = chain.latestBlockHash;
@@ -350,10 +354,7 @@ function renderAccounting(network) {
   setText("#detail-genesis", ctx(chain.token.genesisSupply, 0));
   setText("#detail-issued", ctx(chain.token.totalIssued, 6));
   setText("#detail-burned", ctx(chain.token.totalBurned, 6));
-  setText(
-    "#detail-rate",
-    `${ctx(reward.rate, 6)} / work unit`,
-  );
+  setText("#detail-rate", rewardPolicy(chain));
 }
 
 function renderRuntime(network) {

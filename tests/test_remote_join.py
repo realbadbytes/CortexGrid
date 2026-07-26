@@ -9,7 +9,6 @@ from pathlib import Path
 from cortexgrid.join_protocol import request_json
 from cortexgrid.economics import (
     ECONOMICS_VERSION,
-    REWARD_RATE_MICRO_PER_WORK_UNIT,
 )
 from cortexgrid.network import CortexNetwork
 from cortexgrid.node_daemon import ProviderNode
@@ -73,9 +72,9 @@ class RemoteJoinTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     joined["assignment"]["economics"][
-                        "rewardRateMicroPerWorkUnit"
+                        "servicePriceMicroPerWorkUnit"
                     ],
-                    REWARD_RATE_MICRO_PER_WORK_UNIT,
+                    7,
                 )
                 self.assertEqual(
                     joined["rewardAddress"], provider.reward_address
@@ -145,7 +144,7 @@ class RemoteJoinTests(unittest.TestCase):
                     "/api/economics"
                 )
                 self.assertEqual(
-                    economics_view["version"], "ctx-economics-v4"
+                    economics_view["version"], ECONOMICS_VERSION
                 )
                 provider_view = request_json(
                     f"{provider.attestation_endpoint}/v1/balance"

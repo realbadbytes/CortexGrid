@@ -73,6 +73,8 @@ def format_status(status: dict) -> str:
         f"Weight: {str(shard.get('weightsDigest', ''))[:16]}…\n"
         f"Jobs: {len(status.get('activeJobs', []))} active · "
         f"{status.get('completedJobs', 0)} completed\n"
+        f"Service rate: {status.get('priceMicroPerWorkUnit', 'n/a')} "
+        "micro-CTX/work unit\n"
         f"Reward: {economics.get('rewardDistribution', 'verified useful work')} · "
         f"{economics.get('version', 'policy unavailable')}\n"
         f"CTX: {status.get('balance', 0)} · "

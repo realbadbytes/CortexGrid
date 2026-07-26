@@ -18,8 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from .economics import (
     DEFAULT_PRICE_MICRO_PER_WORK_UNIT,
     ECONOMICS_VERSION,
-    REWARD_RATE_MICRO_PER_WORK_UNIT,
-    validate_price,
+    validate_sponsored_price,
 )
 from .executor import NativeWorker
 from .join_protocol import (
@@ -90,7 +89,7 @@ class ProviderNode:
         self.rpc_port = rpc_port
         self.heartbeat_seconds = heartbeat_seconds
         self.role = role
-        self.price_micro_per_work_unit = validate_price(
+        self.price_micro_per_work_unit = validate_sponsored_price(
             price_micro_per_work_unit
         )
         self.assignment: dict | None = None
@@ -287,8 +286,8 @@ class ProviderNode:
             or assignment["rewardAddress"] != self.reward_address
             or assignment["runtime"]["rpcEndpoint"] != self.rpc_endpoint
             or assignment["economics"]["version"] != ECONOMICS_VERSION
-            or assignment["economics"]["rewardRateMicroPerWorkUnit"]
-            != REWARD_RATE_MICRO_PER_WORK_UNIT
+            or assignment["economics"]["servicePriceMicroPerWorkUnit"]
+            != self.price_micro_per_work_unit
         ):
             raise RuntimeError("coordinator assignment does not match this provider")
 

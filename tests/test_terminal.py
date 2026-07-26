@@ -56,6 +56,7 @@ class FakeApi:
             "block": {"height": 5, "hash": "b" * 64},
             "accounting": {
                 "providerRewards": 1.0,
+                "serviceSponsorFee": 0.4,
                 "verifiedWorkUnits": 10_000,
                 "symbol": "CTX",
             },
@@ -106,7 +107,8 @@ class CortexChatTests(unittest.TestCase):
         self.assertIn("1.0 CTX to compute providers", rendered)
         self.assertIn("10000 verified work units", rendered)
         self.assertIn("earned 0.5 CTX on your node", rendered)
-        self.assertIn("requester paid 0 CTX", rendered)
+        self.assertIn("requester wallet 0 CTX", rendered)
+        self.assertIn("gateway sponsored 0.4 CTX", rendered)
 
     def test_inference_requires_compute_participation(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "compute participant"):

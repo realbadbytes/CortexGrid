@@ -10,8 +10,8 @@
 5. Both participant identities sign chained participation attestations
 6. Python verifies every signature and commitment link
 7. Receipt digests form a Merkle root
-8. One useful-work block mints a fixed amount of CTX per verified work unit
-   directly to the providers with valid receipts
+8. The gateway pays the CTX service fee, and one useful-work block settles
+   provider revenue plus declining bootstrap issuance
 ```
 
 The chain accepts an inference block only when:
@@ -21,13 +21,16 @@ The chain accepts an inference block only when:
 - stages are complete and ordered;
 - request, model, and output commitments match the block;
 - reward recipients are derived from receipt public keys;
-- each provider reward equals its verified work multiplied by the fixed rate;
+- provider quotes equal verified work multiplied by signed service rates;
+- service payment is conserved between providers and the coordinator;
+- bootstrap issuance matches only paid provider service revenue;
 - capped issuance does not exceed the maximum supply;
 - metered work and rewards recompute exactly;
 - balances conserve the resulting total supply.
 
 Transfers use Ed25519 signatures and per-wallet nonces. They cannot invoke the
-issuance transaction type.
+issuance transaction type. When bootstrap issuance ends, inference settlement
+continues entirely through gateway-funded service payments.
 
 ## Why Python plus C++/CUDA
 

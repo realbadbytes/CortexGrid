@@ -8,17 +8,26 @@ GENESIS_SUPPLY_MICRO = 1_000_000 * TOKEN_UNIT
 
 LEGACY_ECONOMICS_VERSION = "ctx-economics-v2"
 LEGACY_BLOCK_ECONOMICS_VERSION = "ctx-economics-v3"
-ECONOMICS_VERSION = "ctx-economics-v4"
+LEGACY_FIXED_WORK_ECONOMICS_VERSION = "ctx-economics-v4"
+ECONOMICS_VERSION = "ctx-economics-v5"
 
 PREFILL_WEIGHT = 1
 DECODE_WEIGHT = 2
 
-# One rule for all new rewards: 100 micro-CTX for each signed, verified work
-# unit. One work unit is one model compute unit applied to one weighted token.
+# v4 paid this fixed issuance rate without requiring service demand. It remains
+# available only so existing devnet blocks remain replayable.
 REWARD_RATE_MICRO_PER_WORK_UNIT = 100
 
-# Provider prices remain accepted by the join protocol so old clients can
-# connect, but v4 reward calculation does not use them.
+# v5 makes inference a paid service. The gateway sponsors walletless end users,
+# providers receive their quoted cost, and the small remainder operates the
+# coordinator. The early-network issuance match declines with actual usage and
+# never replaces the service payment.
+SERVICE_PROVIDER_BPS = 9_500
+SERVICE_PROTOCOL_BPS = 500
+BOOTSTRAP_INITIAL_MATCH_BPS = 20_000
+BOOTSTRAP_HALVING_INFERENCES = 1_000_000
+MAX_SPONSORED_PRICE_MICRO_PER_WORK_UNIT = 100
+
 PRICE_MIN_MICRO_PER_WORK_UNIT = 1
 PRICE_MAX_MICRO_PER_WORK_UNIT = 10_000
 DEFAULT_PRICE_MICRO_PER_WORK_UNIT = 10
@@ -73,6 +82,13 @@ def scheduled_work_reward_micro(inference_index: int) -> int:
     return V3_INITIAL_WORK_REWARD_MICRO >> halvings
 
 
+def bootstrap_match_bps(inference_index: int) -> int:
+    if inference_index < 0:
+        raise ValueError("inference index cannot be negative")
+    halvings = inference_index // BOOTSTRAP_HALVING_INFERENCES
+    return BOOTSTRAP_INITIAL_MATCH_BPS >> halvings
+
+
 def metered_work_units(
     compute_units: int, input_tokens: int, output_tokens: int
 ) -> int:
@@ -96,6 +112,13 @@ def validate_price(price_micro_per_work_unit: object) -> int:
         raise ValueError(
             "provider price is outside the accepted micro-CTX/work-unit range"
         )
+    return price
+
+
+def validate_sponsored_price(price_micro_per_work_unit: object) -> int:
+    price = validate_price(price_micro_per_work_unit)
+    if price > MAX_SPONSORED_PRICE_MICRO_PER_WORK_UNIT:
+        raise ValueError("provider price exceeds the sponsored inference ceiling")
     return price
 
 
@@ -134,6 +157,39 @@ def _legacy_pricing(
         "burnMicro": burn_micro,
         "protocolMicro": protocol_micro,
         "providerPoolMicro": provider_pool_micro,
+    }
+
+
+def _service_pricing(
+    *,
+    provider_work: dict[str, int],
+    provider_rates_micro: dict[str, int],
+) -> dict:
+    normalized_rates = {
+        address: validate_sponsored_price(provider_rates_micro[address])
+        for address in sorted(provider_work)
+    }
+    quoted_provider_cost_micro = sum(
+        int(provider_work[address]) * normalized_rates[address]
+        for address in provider_work
+    )
+    if quoted_provider_cost_micro <= 0:
+        raise ValueError("inference contains no priced provider work")
+    service_fee_micro = ceil_div(
+        quoted_provider_cost_micro * 10_000,
+        SERVICE_PROVIDER_BPS,
+    )
+    protocol_micro = service_fee_micro - quoted_provider_cost_micro
+    return {
+        "model": "sponsor-paid-service-v1",
+        "providerRatesMicroPerWorkUnit": normalized_rates,
+        "quotedProviderCostMicro": quoted_provider_cost_micro,
+        "serviceFeeMicro": service_fee_micro,
+        "providerBps": SERVICE_PROVIDER_BPS,
+        "protocolBps": SERVICE_PROTOCOL_BPS,
+        "providerPoolMicro": quoted_provider_cost_micro,
+        "protocolMicro": protocol_micro,
+        "endUserWalletRequired": False,
     }
 
 
@@ -180,6 +236,33 @@ def build_economics_record(
     }
 
     if version == ECONOMICS_VERSION:
+        pricing = _service_pricing(
+            provider_work=provider_work,
+            provider_rates_micro=provider_rates_micro,
+        )
+        match_bps = bootstrap_match_bps(inference_index)
+        requested_issuance_micro = (
+            pricing["providerPoolMicro"] * match_bps // 10_000
+        )
+        return {
+            "version": version,
+            "metering": metering,
+            "pricing": pricing,
+            "emission": {
+                "schedule": "paid-work-bootstrap-match-v1",
+                "inferenceIndex": inference_index,
+                "halvingIndex": (
+                    inference_index // BOOTSTRAP_HALVING_INFERENCES
+                ),
+                "halvingIntervalInferences": (
+                    BOOTSTRAP_HALVING_INFERENCES
+                ),
+                "matchBps": match_bps,
+                "requestedIssuanceMicro": requested_issuance_micro,
+            },
+        }
+
+    if version == LEGACY_FIXED_WORK_ECONOMICS_VERSION:
         return {
             "version": version,
             "metering": metering,
@@ -280,14 +363,32 @@ def build_economics_record(
     }
 
 
-def public_policy() -> dict:
+def public_policy(inference_index: int = 0) -> dict:
+    current_match_bps = bootstrap_match_bps(inference_index)
     return {
         "version": ECONOMICS_VERSION,
-        "reward": {
-            "rate": tokens(REWARD_RATE_MICRO_PER_WORK_UNIT),
-            "rateMicroPerWorkUnit": REWARD_RATE_MICRO_PER_WORK_UNIT,
+        "service": {
+            "model": "gateway-sponsored usage",
+            "providerBps": SERVICE_PROVIDER_BPS,
+            "protocolBps": SERVICE_PROTOCOL_BPS,
+            "providerSharePercent": SERVICE_PROVIDER_BPS / 100,
+            "protocolSharePercent": SERVICE_PROTOCOL_BPS / 100,
+            "endUserWalletRequired": False,
+            "pricing": "provider rate × verified work",
+            "maximumSponsoredRateMicroPerWorkUnit": (
+                MAX_SPONSORED_PRICE_MICRO_PER_WORK_UNIT
+            ),
             "unit": "verified model-compute-unit × weighted-token",
             "eligibility": "signed work in a finalized inference block",
-            "distribution": "each provider is paid for its own verified work",
+            "distribution": "providers receive paid service revenue",
+        },
+        "bootstrap": {
+            "schedule": "paid-work-bootstrap-match-v1",
+            "initialMatchBps": BOOTSTRAP_INITIAL_MATCH_BPS,
+            "currentMatchBps": current_match_bps,
+            "currentMatchMultiplier": current_match_bps / 10_000,
+            "halvingIntervalInferences": BOOTSTRAP_HALVING_INFERENCES,
+            "basis": "provider service payments in finalized inference blocks",
+            "stopsAtSupplyCap": True,
         },
     }

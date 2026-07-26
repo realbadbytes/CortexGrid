@@ -20,12 +20,14 @@ from .blockchain import (
     verify_proof_bundle,
 )
 from .economics import (
+    BOOTSTRAP_INITIAL_MATCH_BPS,
     CAPACITY_TARGET_REPLICAS,
     DEFAULT_PRICE_MICRO_PER_WORK_UNIT,
     ECONOMICS_VERSION,
-    REWARD_RATE_MICRO_PER_WORK_UNIT,
+    SERVICE_PROTOCOL_BPS,
+    SERVICE_PROVIDER_BPS,
     build_economics_record,
-    validate_price,
+    validate_sponsored_price,
 )
 from .executor import ExecutionReceipt, NativeWorker, verify_receipt_signature
 from .join_protocol import (
@@ -364,6 +366,7 @@ class CortexNetwork:
         return min(
             candidates,
             key=lambda node: (
+                node.price_micro_per_work_unit,
                 node.completed_jobs,
                 node.network_latency_ms,
                 node.id,
@@ -582,7 +585,7 @@ class CortexNetwork:
         try:
             memory_gib = float(registration["memoryGiB"])
             latency_ms = int(registration["networkLatencyMs"])
-            price_micro_per_work_unit = validate_price(
+            price_micro_per_work_unit = validate_sponsored_price(
                 registration["priceMicroPerWorkUnit"]
             )
         except (KeyError, TypeError, ValueError) as error:
@@ -682,8 +685,13 @@ class CortexNetwork:
                 },
                 "economics": {
                     "version": ECONOMICS_VERSION,
-                    "rewardRateMicroPerWorkUnit": (
-                        REWARD_RATE_MICRO_PER_WORK_UNIT
+                    "servicePriceMicroPerWorkUnit": (
+                        price_micro_per_work_unit
+                    ),
+                    "providerServiceShareBps": SERVICE_PROVIDER_BPS,
+                    "protocolServiceShareBps": SERVICE_PROTOCOL_BPS,
+                    "bootstrapInitialMatchBps": (
+                        BOOTSTRAP_INITIAL_MATCH_BPS
                     ),
                     "rewardUnit": (
                         "verified model-compute-unit-weighted-token"
@@ -692,7 +700,7 @@ class CortexNetwork:
                         "signed work in a finalized inference block"
                     ),
                     "rewardDistribution": (
-                        "fixed rate multiplied by this node's verified work"
+                        "paid service revenue plus declining bootstrap issuance"
                     ),
                 },
                 "lease": {
@@ -1203,6 +1211,9 @@ class CortexNetwork:
                 "participantReward": round(participant_reward, 6),
                 "endUserWalletRequired": False,
                 "endUserFee": 0,
+                "serviceSponsorFee": result["accounting"][
+                    "serviceSponsorFee"
+                ],
                 "symbol": TOKEN_SYMBOL,
             }
             return result
@@ -1271,13 +1282,25 @@ class CortexNetwork:
             provider_rates_micro: dict[str, int] = {}
             for receipt in receipts:
                 address = address_from_public_key(receipt.public_key)
+                node = self.nodes.get(receipt.node_id)
+                if (
+                    node is None
+                    or node.worker.reward_address != address
+                ):
+                    raise RuntimeError(
+                        "inference receipt does not match a priced provider"
+                    )
                 provider_compute_units[address] = (
                     provider_compute_units.get(address, 0)
                     + int(receipt.compute_units)
                 )
-                provider_rates_micro.setdefault(
-                    address, DEFAULT_PRICE_MICRO_PER_WORK_UNIT
+                previous_rate = provider_rates_micro.setdefault(
+                    address, node.price_micro_per_work_unit
                 )
+                if previous_rate != node.price_micro_per_work_unit:
+                    raise RuntimeError(
+                        "one reward address advertised conflicting service rates"
+                    )
             ready_capacity_units, target_capacity_units = (
                 self._ready_capacity_units()
             )
@@ -1320,18 +1343,31 @@ class CortexNetwork:
                 transaction["issuanceAmountMicro"]
                 for transaction in reward_transactions
             )
+            provider_service_micro = sum(
+                transaction["feeAmountMicro"]
+                for transaction in reward_transactions
+            )
+            provider_rewards_micro = provider_service_micro + issued_micro
+            service_fee_micro = int(
+                economics["pricing"]["serviceFeeMicro"]
+            )
+            protocol_fee_micro = int(
+                economics["pricing"]["protocolMicro"]
+            )
             accounting = {
                 "symbol": TOKEN_SYMBOL,
                 "economicsVersion": economics["version"],
                 "endUserFee": 0,
-                "providerRewards": tokens(issued_micro),
+                "endUserWalletRequired": False,
+                "serviceSponsorFee": tokens(service_fee_micro),
+                "providerServicePayments": tokens(provider_service_micro),
+                "providerRewards": tokens(provider_rewards_micro),
+                "protocolFee": tokens(protocol_fee_micro),
                 "issuance": tokens(issued_micro),
+                "bootstrapMatchBps": economics["emission"]["matchBps"],
                 "verifiedWorkUnits": economics["metering"][
                     "meteredWorkUnits"
                 ],
-                "rewardRate": tokens(
-                    economics["reward"]["rateMicroPerWorkUnit"]
-                ),
                 "rewardUnit": (
                     "CTX per verified model-compute-unit-weighted-token"
                 ),
@@ -1388,6 +1424,7 @@ class CortexNetwork:
                     "mode": "network-sponsored",
                     "endUserWalletRequired": False,
                     "endUserFee": 0,
+                    "serviceSponsorFee": tokens(service_fee_micro),
                     "symbol": TOKEN_SYMBOL,
                 },
                 "model": {

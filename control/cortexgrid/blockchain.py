@@ -14,6 +14,7 @@ from .economics import (
     INFERENCES_PER_EPOCH,
     LEGACY_BLOCK_ECONOMICS_VERSION,
     LEGACY_ECONOMICS_VERSION,
+    LEGACY_FIXED_WORK_ECONOMICS_VERSION,
     MAX_SUPPLY_MICRO,
     TOKEN_SYMBOL,
     TOKEN_UNIT,
@@ -170,6 +171,7 @@ def inference_transactions(
         ECONOMICS_VERSION,
         LEGACY_ECONOMICS_VERSION,
         LEGACY_BLOCK_ECONOMICS_VERSION,
+        LEGACY_FIXED_WORK_ECONOMICS_VERSION,
     }:
         raise ValueError("unsupported CTX economics version")
     work_by_address = _work_by_address(proof)
@@ -185,6 +187,71 @@ def inference_transactions(
 
     remaining_supply = max(0, MAX_SUPPLY_MICRO - current_supply_micro)
     if economics_version == ECONOMICS_VERSION:
+        pricing = economics["pricing"]
+        emission = economics["emission"]
+        provider_rates = pricing["providerRatesMicroPerWorkUnit"]
+        if set(provider_rates) != set(work_by_address):
+            raise ValueError("economics prices do not match inference receipts")
+        quote_by_address = {
+            address: int(provider_work[address]) * int(provider_rates[address])
+            for address in work_by_address
+        }
+        provider_pool_micro = int(pricing["providerPoolMicro"])
+        if sum(quote_by_address.values()) != provider_pool_micro:
+            raise ValueError("provider service quotes do not match the service pool")
+        fee_micro = int(pricing["serviceFeeMicro"])
+        protocol_micro = int(pricing["protocolMicro"])
+        if fee_micro != provider_pool_micro + protocol_micro:
+            raise ValueError("CTX service payment does not conserve value")
+        issuance_pool = min(
+            int(emission["requestedIssuanceMicro"]),
+            remaining_supply,
+        )
+        transactions = [
+            {
+                "type": "inference_fee",
+                "from": payer,
+                "to": ESCROW_ADDRESS,
+                "amountMicro": fee_micro,
+                "inferenceId": inference_id,
+                "economicsVersion": economics_version,
+            },
+            {
+                "type": "protocol_fee",
+                "from": ESCROW_ADDRESS,
+                "to": PROTOCOL_ADDRESS,
+                "amountMicro": protocol_micro,
+                "inferenceId": inference_id,
+            },
+        ]
+        distributed_issuance = 0
+        ordered_providers = sorted(work_by_address.items())
+        for index, (address, work) in enumerate(ordered_providers):
+            is_last = index == len(ordered_providers) - 1
+            quoted = quote_by_address[address]
+            issuance_reward = (
+                issuance_pool - distributed_issuance
+                if is_last
+                else issuance_pool * quoted // provider_pool_micro
+            )
+            distributed_issuance += issuance_reward
+            transactions.append(
+                {
+                    "type": "provider_reward",
+                    "to": address,
+                    "nodeIds": sorted(work["nodeIds"]),
+                    "computeUnits": int(work["computeUnits"]),
+                    "workUnits": int(provider_work[address]),
+                    "priceMicroPerWorkUnit": int(provider_rates[address]),
+                    "quotedAmountMicro": quoted,
+                    "feeAmountMicro": quoted,
+                    "issuanceAmountMicro": issuance_reward,
+                    "inferenceId": inference_id,
+                }
+            )
+        return transactions
+
+    if economics_version == LEGACY_FIXED_WORK_ECONOMICS_VERSION:
         reward = economics["reward"]
         issuance_pool = min(
             int(reward["requestedIssuanceMicro"]),
@@ -602,8 +669,13 @@ class Blockchain:
             )
             if canonical_json(expected_economics) != canonical_json(economics):
                 raise ValueError("inference economics record is invalid")
-            if economics["version"] != ECONOMICS_VERSION:
-                fee_micro = int(economics["pricing"]["feeMicro"])
+            if economics["version"] != LEGACY_FIXED_WORK_ECONOMICS_VERSION:
+                fee_key = (
+                    "serviceFeeMicro"
+                    if economics["version"] == ECONOMICS_VERSION
+                    else "feeMicro"
+                )
+                fee_micro = int(economics["pricing"][fee_key])
                 if self.balances.get(payer, 0) < fee_micro:
                     raise ValueError(
                         f"insufficient {TOKEN_SYMBOL} for inference"
@@ -765,7 +837,8 @@ class Blockchain:
                     economics = payload.get("economics")
                     requires_fee = (
                         economics is None
-                        or economics.get("version") != ECONOMICS_VERSION
+                        or economics.get("version")
+                        != LEGACY_FIXED_WORK_ECONOMICS_VERSION
                     )
                     if requires_fee and (
                         not block["transactions"]
@@ -887,7 +960,9 @@ class Blockchain:
                     "totalBurned": tokens(self.total_burned_micro),
                     "providerRewards": tokens(self.total_provider_rewards_micro),
                 },
-                "economics": public_policy(),
+                "economics": public_policy(
+                    self.economic_context()["inferenceIndex"]
+                ),
                 "demoWallet": {
                     "address": self.demo_address,
                     "balance": tokens(self.balance_of(self.demo_address)),

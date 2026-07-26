@@ -173,7 +173,9 @@ class CortexSession:
                     f"reward {accounting.get('providerRewards', 0)} "
                     f"{accounting.get('symbol', 'CTX')} to compute providers · "
                     f"{accounting.get('verifiedWorkUnits', 0)} verified work units · "
-                    "requester paid 0 CTX",
+                    "requester wallet 0 CTX · "
+                    f"gateway sponsored {accounting.get('serviceSponsorFee', 0)} "
+                    f"{accounting.get('symbol', 'CTX')}",
                 )
             )
             access = result.get("access", {})

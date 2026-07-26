@@ -24,9 +24,9 @@ class ProviderCliTests(unittest.TestCase):
                         "weightsDigest": "a" * 64,
                     },
                     "economics": {
-                        "version": "ctx-economics-v4",
+                        "version": "ctx-economics-v5",
                         "rewardDistribution": (
-                            "fixed rate multiplied by this node's verified work"
+                            "paid service revenue plus declining bootstrap issuance"
                         ),
                     },
                 },
@@ -42,9 +42,9 @@ class ProviderCliTests(unittest.TestCase):
         )
         self.assertIn("Stage: 1 · Layers: 15–29", rendered)
         self.assertIn("Jobs: 1 active · 7 completed", rendered)
-        self.assertNotIn("Bid:", rendered)
-        self.assertIn("fixed rate multiplied", rendered)
-        self.assertIn("ctx-economics-v4", rendered)
+        self.assertIn("Service rate: 12 micro-CTX/work unit", rendered)
+        self.assertIn("paid service revenue", rendered)
+        self.assertIn("ctx-economics-v5", rendered)
         self.assertIn("CTX: 3.5", rendered)
 
     def test_jobs_show_active_and_finalized_rewards(self) -> None:

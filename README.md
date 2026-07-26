@@ -50,7 +50,9 @@ make chat-browser \
 
 The command creates a local provider identity and reward wallet, receives a
 model stage, starts the local compute bridge, and opens the browser. No CTX or
-pre-existing wallet is required. Closing the process leaves the network.
+pre-existing wallet is required: the service gateway sponsors the inference
+payment. Your machine receives its provider payment when selected. Closing the
+process leaves the network.
 
 For the terminal interface:
 
@@ -75,6 +77,7 @@ make join \
   NODE_ID=my-gpu-01 \
   NODE_NAME="My GPU" \
   MEMORY_GIB=24 \
+  PROVIDER_PRICE_MICRO=10 \
   REGION=us-east \
   COORDINATOR_URL=http://COORDINATOR_IP:65534 \
   COORDINATOR_PUBLIC_KEY=OUT_OF_BAND_KEY \
@@ -107,17 +110,28 @@ fault tolerance.
 
 ## CTX
 
-CTX is created only for completed, verified inference:
+CTX is the settlement asset for inference. End users can remain walletless:
+the service gateway pays CTX on their behalf, while subscriptions or other
+user billing remain outside the ledger.
 
 ```text
-provider reward = verified work units × 0.0001 CTX
+provider quote   = verified work units × provider service rate
+service payment = provider quotes ÷ 95%
+provider reward = provider quote + declining bootstrap issuance
 ```
 
+Providers receive 95% of the gateway service payment; the coordinator receives
+5%. Early-network issuance starts as a 2× match on provider service revenue and
+halves every one million finalized inferences. The match is clipped at the
+1 billion CTX supply cap, but paid service revenue continues after issuance
+ends. There is no burn.
+
 Every selected provider signs a work receipt. The coordinator verifies the
-route, model commitments, output commitments, signatures, and reward amount
-before finalizing a block and crediting provider reward addresses. Idle,
-offline, invalid, and unselected machines mint nothing. Supply is capped at
-1 billion CTX.
+route, model commitments, output commitments, signatures, pricing, and
+settlement before finalizing a block. Idle, offline, invalid, and unselected
+machines earn nothing. Providers should set `PROVIDER_PRICE_MICRO` high enough
+to cover their own hardware, electricity, bandwidth, and operating costs;
+lower-priced replicas are routed first.
 
 Balances are stored on the CTX ledger. The key controlling a worker's address
 stays in `.provider/NODE_ID/node_wallet.json`; the default chat identity uses
@@ -148,4 +162,5 @@ production-scale multi-terabyte deployment. Registration, assignments, work
 tickets, and receipts are signed. The upstream llama.cpp tensor RPC must still
 run on a trusted private network or VPN. Work signatures prove attributable
 participation, not Byzantine-safe numerical correctness. CTX has no guaranteed
-market value or exchange listing.
+market value or exchange listing, and a configured provider rate is not a
+profit guarantee.

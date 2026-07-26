@@ -16,6 +16,7 @@ from .network import CortexNetwork
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PUBLIC_DIR = PROJECT_ROOT / "public"
 MAX_BODY_BYTES = 1_000_000
+mimetypes.add_type("font/otf", ".otb")
 
 
 class ApiHandler(BaseHTTPRequestHandler):
@@ -63,7 +64,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header(
+            "Cache-Control",
+            (
+                "public, max-age=31536000, immutable"
+                if file_path.suffix == ".otb"
+                else "no-cache"
+            ),
+        )
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(content)
@@ -208,7 +216,7 @@ def openapi_document(port: int) -> dict:
             "/api/network": {"get": {"summary": "Network-wide snapshot"}},
             "/api/chain": {"get": {"summary": "CTX chain and balances"}},
             "/api/economics": {
-                "get": {"summary": "CTX pricing, emission policy, and epoch state"}
+                "get": {"summary": "Fixed CTX reward per verified work unit"}
             },
             "/api/blocks/{height}": {
                 "get": {"summary": "Full block with inference receipts"}
@@ -216,7 +224,7 @@ def openapi_document(port: int) -> dict:
             "/api/inference": {
                 "post": {
                     "summary": (
-                        "Execute inference for an online CortexTerm compute "
+                        "Execute inference for an online CortexGrid Chat compute "
                         "participant and finalize its useful-work block"
                     )
                 }
@@ -250,7 +258,7 @@ def openapi_document(port: int) -> dict:
 
 
 def main() -> None:
-    port = int(os.environ.get("PORT", "4173"))
+    port = int(os.environ.get("PORT", "65534"))
     network = CortexNetwork()
     server: CortexHttpServer | None = None
 

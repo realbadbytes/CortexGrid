@@ -1,15 +1,15 @@
-.PHONY: build build-model-runtime build-provider-runtime bootstrap-model bootstrap-provider run run-real join term node test test-real check clean
+.PHONY: build build-model-runtime build-provider-runtime bootstrap-model bootstrap-provider run run-real join chat chat-browser term term-browser node test test-real check clean
 
 BUILD_DIR ?= build
 CMAKE_BUILD_TYPE ?= Release
-PORT ?= 4173
+PORT ?= 65534
 LLAMA_DIR ?= third_party/llama.cpp
 LLAMA_BUILD_DIR ?= $(BUILD_DIR)/llama
 MODEL_FILE ?= models/SmolLM2-135M-Instruct-Q4_K_M.gguf
 LLAMA_COMMIT ?= 720d7fa4097f76e5d0eade5a92c1df87c1faf9d9
 MODEL_URL ?= https://huggingface.co/bartowski/SmolLM2-135M-Instruct-GGUF/resolve/main/SmolLM2-135M-Instruct-Q4_K_M.gguf
 LLAMA_CUDA ?= $(shell command -v nvcc >/dev/null 2>&1 && echo ON || echo OFF)
-COORDINATOR_URL ?= http://127.0.0.1:4173
+COORDINATOR_URL ?= http://127.0.0.1:65534
 COORDINATOR_PUBLIC_KEY ?=
 NODE_ID ?= provider-one
 NODE_NAME ?= $(NODE_ID)
@@ -66,8 +66,15 @@ run-real: build build-model-runtime
 join: build build-provider-runtime
 	PYTHONPATH=control python3 -m cortexgrid.node_daemon --coordinator $(COORDINATOR_URL) $(if $(COORDINATOR_PUBLIC_KEY),--coordinator-public-key $(COORDINATOR_PUBLIC_KEY),) --node-id $(NODE_ID) --name "$(NODE_NAME)" --operator "$(OPERATOR)" --region $(REGION) --memory-gib $(MEMORY_GIB) --price-micro-per-work-unit $(PROVIDER_PRICE_MICRO) --advertise-host $(ADVERTISE_HOST) --api-port $(PROVIDER_API_PORT) --rpc-port $(PROVIDER_RPC_PORT) --executor $(CURDIR)/$(BUILD_DIR)/cortex_worker --rpc-binary $(CURDIR)/$(LLAMA_BUILD_DIR)/bin/ggml-rpc-server
 
-term: build build-provider-runtime
+chat: build build-provider-runtime
 	PYTHONPATH=control python3 -m cortexgrid.terminal --server $(COORDINATOR_URL) $(if $(COORDINATOR_PUBLIC_KEY),--coordinator-public-key $(COORDINATOR_PUBLIC_KEY),) $(if $(TERM_NODE_ID),--node-id $(TERM_NODE_ID),) $(if $(TERM_MEMORY_GIB),--memory-gib $(TERM_MEMORY_GIB),) --operator "$(OPERATOR)" --region $(REGION) --advertise-host $(ADVERTISE_HOST) --provider-api-port $(TERM_API_PORT) --provider-rpc-port $(TERM_RPC_PORT) --executor $(CURDIR)/$(BUILD_DIR)/cortex_worker --rpc-binary $(CURDIR)/$(LLAMA_BUILD_DIR)/bin/ggml-rpc-server
+
+chat-browser: build build-provider-runtime
+	PYTHONPATH=control python3 -m cortexgrid.terminal --browser --server $(COORDINATOR_URL) $(if $(COORDINATOR_PUBLIC_KEY),--coordinator-public-key $(COORDINATOR_PUBLIC_KEY),) $(if $(TERM_NODE_ID),--node-id $(TERM_NODE_ID),) $(if $(TERM_MEMORY_GIB),--memory-gib $(TERM_MEMORY_GIB),) --operator "$(OPERATOR)" --region $(REGION) --advertise-host $(ADVERTISE_HOST) --provider-api-port $(TERM_API_PORT) --provider-rpc-port $(TERM_RPC_PORT) --executor $(CURDIR)/$(BUILD_DIR)/cortex_worker --rpc-binary $(CURDIR)/$(LLAMA_BUILD_DIR)/bin/ggml-rpc-server
+
+term: chat
+
+term-browser: chat-browser
 
 node:
 	PYTHONPATH=control python3 -m cortexgrid.provider_cli status --node-id $(NODE_ID) --api http://127.0.0.1:$(PROVIDER_API_PORT)

@@ -55,8 +55,8 @@ class RealDistributedModelTests(unittest.TestCase):
             economics["metering"]["outputTokens"],
             result["performance"]["tokens"]["completion_tokens"],
         )
-        self.assertGreater(result["accounting"]["sponsorFee"], 0)
-        self.assertGreater(result["accounting"]["providerFeeRewards"], 0)
+        self.assertGreater(result["accounting"]["verifiedWorkUnits"], 0)
+        self.assertGreater(result["accounting"]["providerRewards"], 0)
         self.assertTrue(result["output"]["text"])
         self.assertTrue(self.network.chain.validate()["valid"])
         reference = self.network.model_runtime.generate(

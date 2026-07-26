@@ -18,14 +18,15 @@ Coordinator ──────────────────────�
     ├── stage 1 / layers 15–29 ─ participant B (RAM/GPU) │
     └── replicas / throughput ─── dedicated workers       │
                                                           │
-CortexTerm prompt ── distributed inference ── proof ── CTX block/rewards
+CortexGrid Chat ─── distributed inference ── proof ── CTX block/rewards
 ```
 
 ## Two ways to participate
 
-1. **Use and serve:** CortexTerm joins as a compute provider, receives a model
-   stage, serves network jobs, earns CTX when selected, and lets you chat with
-   the pooled model. Inference access lasts only while your node is online.
+1. **Use and serve:** CortexGrid Chat joins as a compute provider, receives a
+   model stage, executes that stage on its own prompts, serves other network
+   jobs, earns CTX for successful work, and lets you chat with the pooled
+   model. Inference access lasts only while your node is online.
 2. **Serve only:** a dedicated worker stays online to host model stages and run
    inference for others, earning CTX without submitting its own prompts.
 
@@ -42,10 +43,10 @@ make bootstrap-model
 make run-real
 ```
 
-The API and dashboard listen at `http://localhost:4173`. Providers should pin
+The API and dashboard listen at `http://localhost:65534`. Providers should pin
 the `coordinatorPublicKey` returned by `GET /api/health`.
 
-## Use and serve with CortexTerm
+## Use and serve with CortexGrid Chat
 
 First build the provider runtime:
 
@@ -53,35 +54,49 @@ First build the provider runtime:
 make bootstrap-provider
 ```
 
-Then join and chat:
+For the browser interface:
 
 ```bash
-make term \
-  COORDINATOR_URL=http://COORDINATOR_IP:4173 \
+make chat-browser \
+  COORDINATOR_URL=http://COORDINATOR_IP:65534 \
   COORDINATOR_PUBLIC_KEY=OUT_OF_BAND_KEY \
   ADVERTISE_HOST=THIS_MACHINE_IP \
   TERM_MEMORY_GIB=24
 ```
 
-CortexTerm automatically creates a provider identity and reward wallet, joins,
-serves its assigned stage, and signs each prompt as proof that it is online and
-contributing. You need no existing CTX and no manually configured wallet.
-`/status` shows your stage and CTX balance; `/exit` leaves the network and stops
-serving.
+This starts the local compute bridge and opens CortexGrid Chat in the browser.
+The bridge token stays in the URL fragment and is never sent to the
+coordinator. Closing the bridge leaves the network and stops serving.
+
+For the terminal interface:
+
+```bash
+make chat \
+  COORDINATOR_URL=http://COORDINATOR_IP:65534 \
+  COORDINATOR_PUBLIC_KEY=OUT_OF_BAND_KEY \
+  ADVERTISE_HOST=THIS_MACHINE_IP \
+  TERM_MEMORY_GIB=24
+```
+
+CortexGrid Chat creates a provider identity and reward wallet, joins, serves
+its assigned stage, and signs each prompt. You need no existing CTX and no
+manually configured wallet. `/status` shows your stage and CTX balance;
+`/exit` leaves the network.
 
 Useful commands: `/status`, `/route`, `/proof`, `/new`, `/help`, and `/exit`.
 For one prompt:
 
 ```bash
-./CortexTerm --server http://COORDINATOR_IP:4173 \
+./CortexChat --server http://COORDINATOR_IP:65534 \
   --coordinator-public-key OUT_OF_BAND_KEY \
   --advertise-host THIS_MACHINE_IP \
   --memory-gib 24 \
   -p "Explain pipeline parallelism."
 ```
 
-Your node is eligible to earn CTX from any routed job, but it is not guaranteed
-to be selected for its own prompt.
+Your assigned stage is routed through your node for your own successful prompt,
+so you earn a share of that inference's CTX reward. Your node remains eligible
+for other routed jobs while CortexGrid Chat is online.
 
 ## Run a dedicated worker
 
@@ -92,7 +107,7 @@ make join \
   NODE_NAME="My GPU" \
   MEMORY_GIB=24 \
   REGION=us-east \
-  COORDINATOR_URL=http://COORDINATOR_IP:4173 \
+  COORDINATOR_URL=http://COORDINATOR_IP:65534 \
   COORDINATOR_PUBLIC_KEY=OUT_OF_BAND_KEY \
   ADVERTISE_HOST=THIS_MACHINE_IP
 ```
@@ -117,19 +132,21 @@ allows larger stage sets; adding replicas and compute increases throughput.
 
 CTX balances live on-chain at each provider's reward address. The controlling
 key is local: `.provider/NODE_ID/node_wallet.json` for dedicated workers and
-`.provider/cortexterm/node_wallet.json` for the default CortexTerm identity.
-Back it up securely.
+`.provider/cortexterm/node_wallet.json` for the default CortexGrid Chat
+identity. The old directory name is retained for wallet compatibility. Back it
+up securely.
 
 ```bash
-curl http://COORDINATOR_IP:4173/api/network
-curl http://COORDINATOR_IP:4173/api/models
-curl http://COORDINATOR_IP:4173/api/chain
-curl http://COORDINATOR_IP:4173/api/economics
+curl http://COORDINATOR_IP:65534/api/network
+curl http://COORDINATOR_IP:65534/api/models
+curl http://COORDINATOR_IP:65534/api/chain
+curl http://COORDINATOR_IP:65534/api/economics
 ```
 
-Each metered inference fee pays 85% to providers, 10% to the protocol, and
-burns 5%. Capacity- and demand-limited issuance subsidizes verified early
-network work; idle capacity cannot mint CTX. See
+Every selected provider earns `0.0001 CTX × verified work units`. More
+successful processing earns more CTX; idle or invalid nodes earn nothing.
+End-user billing is separate from the token ledger. There are no CTX inference
+fees, fee splits, burns, epochs, halvings, or block jackpots. See
 [docs/ECONOMICS.md](docs/ECONOMICS.md).
 
 ## Verify and current boundary

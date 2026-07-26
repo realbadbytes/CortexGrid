@@ -41,10 +41,12 @@ class FakeApi:
             "id": f"inf_{len(self.prompts)}",
             "output": {"text": f"answer {len(self.prompts)}"},
             "access": {
-                "mode": "network-sponsored",
+                "mode": "compute-participant",
                 "endUserWalletRequired": False,
                 "endUserFee": 0,
                 "symbol": "CTX",
+                "participantSelected": True,
+                "participantReward": 0.5,
             },
             "route": [
                 {"stage": 0, "nodeId": "atlas", "nodeName": "Atlas"},
@@ -52,11 +54,15 @@ class FakeApi:
             ],
             "proof": {"root": "a" * 64},
             "block": {"height": 5, "hash": "b" * 64},
-            "accounting": {"providerRewards": 1.0, "symbol": "CTX"},
+            "accounting": {
+                "providerRewards": 1.0,
+                "verifiedWorkUnits": 10_000,
+                "symbol": "CTX",
+            },
         }
 
 
-class CortexTerminalTests(unittest.TestCase):
+class CortexChatTests(unittest.TestCase):
     @staticmethod
     def signer(prompt: str, model_id: str | None) -> dict:
         return {
@@ -98,6 +104,8 @@ class CortexTerminalTests(unittest.TestCase):
         self.assertIn("Atlas[0] → Ember[1]", rendered)
         self.assertIn("block  #5", rendered)
         self.assertIn("1.0 CTX to compute providers", rendered)
+        self.assertIn("10000 verified work units", rendered)
+        self.assertIn("earned 0.5 CTX on your node", rendered)
         self.assertIn("requester paid 0 CTX", rendered)
 
     def test_inference_requires_compute_participation(self) -> None:

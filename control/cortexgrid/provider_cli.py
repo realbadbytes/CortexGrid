@@ -61,6 +61,7 @@ def format_status(status: dict) -> str:
     )
     state = "joined" if status.get("joined") else "left"
     rpc_state = "online" if status.get("rpcOnline") else "offline"
+    economics = assignment.get("economics") or {}
     return (
         f"{status['name']} ({status['nodeId']}) · {state}\n"
         f"Role: {status.get('role', 'dedicated-worker')} · "
@@ -72,7 +73,8 @@ def format_status(status: dict) -> str:
         f"Weight: {str(shard.get('weightsDigest', ''))[:16]}…\n"
         f"Jobs: {len(status.get('activeJobs', []))} active · "
         f"{status.get('completedJobs', 0)} completed\n"
-        f"Bid: {status.get('priceMicroPerWorkUnit', 'n/a')} micro-CTX/work unit\n"
+        f"Reward: {economics.get('rewardDistribution', 'verified useful work')} · "
+        f"{economics.get('version', 'policy unavailable')}\n"
         f"CTX: {status.get('balance', 0)} · "
         f"{status.get('rewardAddress', '')}\n"
         f"Chain: #{status.get('chainHeight', 0)} · "

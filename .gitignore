@@ -1,0 +1,12 @@
+.DS_Store
+*.log
+.env
+coverage/
+build/
+__pycache__/
+*.py[cod]
+.venv/
+.data/
+.provider/
+models/*.gguf
+third_party/llama.cpp/

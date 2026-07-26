@@ -5,285 +5,309 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="CortexGrid distributed inference network operations dashboard."
+      content="CortexGrid pools participant hardware for distributed AI inference and rewards verified work with CTX."
     />
-    <title>CortexGrid // Network Console</title>
+    <meta name="theme-color" content="#090b0c" />
+    <title>CortexGrid — Run AI models beyond one machine</title>
     <link rel="icon" href="/mark.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <a class="skip-link" href="#main">Skip to network data</a>
+    <a class="skip-link" href="#main">Skip to content</a>
 
-    <header class="topbar">
-      <a class="identity" href="#overview" aria-label="CortexGrid overview">
+    <header class="site-header">
+      <a class="wordmark" href="#main">
         <span aria-hidden="true">[CG]</span>
         <strong>CORTEXGRID</strong>
-        <small>CTX NETWORK CONSOLE</small>
+        <small>/ DEVNET</small>
       </a>
-      <nav aria-label="Dashboard sections">
-        <a href="#overview">OVERVIEW</a>
-        <a href="#chain">CHAIN</a>
-        <a href="#providers">PROVIDERS</a>
-        <a href="#access">ACCESS</a>
-        <a href="#model">MODEL</a>
-        <a href="/api/openapi.json">API</a>
-      </nav>
       <div class="connection" id="connection">
         <span class="status-mark" aria-hidden="true"></span>
         <span id="network-label">CONNECTING</span>
       </div>
     </header>
 
-    <main class="workspace" id="main">
-      <section class="panel overview" id="overview">
-        <div class="panel-heading">
-          <h1>CTX NETWORK</h1>
-          <div class="panel-tools">
-            <span>DEVNET / <span id="protocol-version">—</span></span>
-            <button id="refresh-network" type="button">REFRESH</button>
-          </div>
+    <main id="main">
+      <section class="live-proof" aria-label="Live network activity">
+        <div>
+          <span class="status-mark" aria-hidden="true"></span>
+          <strong>Live network</strong>
         </div>
-        <div class="purpose">
-          <span class="prompt-mark" aria-hidden="true">&gt;</span>
-          <p id="network-purpose">
-            CTX settles proof of useful inference. Verified work creates blocks,
-            pays compute providers, and controls token issuance.
-          </p>
-        </div>
-        <dl class="metrics" aria-label="Network metrics">
+        <dl>
           <div>
-            <dt>CONSENSUS</dt>
-            <dd id="metric-consensus">—</dd>
+            <dt>Providers</dt>
+            <dd id="stat-workers">—</dd>
           </div>
           <div>
-            <dt>CHAIN</dt>
-            <dd id="metric-chain-valid">—</dd>
+            <dt>Inferences</dt>
+            <dd id="stat-inferences">—</dd>
           </div>
           <div>
-            <dt>HEIGHT</dt>
-            <dd id="metric-height">—</dd>
-          </div>
-          <div>
-            <dt>CTX SUPPLY</dt>
-            <dd id="metric-supply">—</dd>
-          </div>
-          <div>
-            <dt>PROVIDER REWARDS</dt>
-            <dd id="metric-rewards">—</dd>
-          </div>
-          <div>
-            <dt>BURNED</dt>
-            <dd id="metric-burned">—</dd>
-          </div>
-          <div>
-            <dt>INFERENCE BLOCKS</dt>
-            <dd id="metric-inferences">—</dd>
-          </div>
-          <div>
-            <dt>ONLINE WORKERS</dt>
-            <dd id="metric-nodes">—</dd>
+            <dt>CTX rewarded</dt>
+            <dd id="stat-rewards">—</dd>
           </div>
         </dl>
+        <button id="refresh-network" type="button">Refresh</button>
       </section>
 
-      <div class="two-column">
-        <section class="panel" id="access">
-          <div class="panel-heading">
-            <h2>NETWORK ACCESS</h2>
-            <span>COMPUTE PARTICIPATION REQUIRED</span>
-          </div>
-          <div class="panel-body">
-            <p class="notice">
-              Browser inference is disabled. To query the network, CortexTerm
-              must join as an online compute participant and serve its assigned
-              model stage.
+      <section class="intro">
+        <p class="eyebrow">SHARED COMPUTE FOR LARGE AI MODELS</p>
+        <h1>Run models too large for one machine.</h1>
+        <p>
+          CortexGrid splits large models across member hardware. Use the
+          network while contributing your machine, or run a dedicated worker
+          and earn CTX for verified inference.
+        </p>
+        <a class="primary-action" href="#participate">Open CortexGrid Chat</a>
+      </section>
+
+      <section class="connect" id="participate" aria-labelledby="connect-heading">
+        <div class="section-intro">
+          <h2 id="connect-heading">Join CortexGrid</h2>
+          <p>Choose how this machine will participate.</p>
+        </div>
+        <label class="join-choice" for="join-mode">
+          <span>I want to</span>
+          <select id="join-mode">
+            <option value="interactive">use CortexGrid Chat and contribute compute</option>
+            <option value="worker">provide compute only</option>
+          </select>
+        </label>
+
+        <div id="interactive-panel">
+          <p class="mode-description">
+            Chat in this page while your local compute bridge hosts an assigned
+            model stage. The bridge keeps your worker identity on your machine.
+          </p>
+
+          <div class="bridge-setup" id="bridge-setup">
+            <strong>Start local compute to enable chat</strong>
+            <p>
+              Run this command on your machine and leave it open. It joins the
+              compute network, then opens this page with a private connection.
             </p>
-            <div class="command-block">
-              <div class="command-label">
-                <span>USE + SERVE</span>
-                <button type="button" data-copy-target="term-command">COPY</button>
-              </div>
-              <code id="term-command">make term COORDINATOR_URL=http://COORDINATOR_IP:4173 ADVERTISE_HOST=THIS_MACHINE_IP TERM_MEMORY_GIB=24</code>
+            <div class="command">
+              <code id="browser-command">make chat-browser COORDINATOR_URL=http://COORDINATOR_IP:65534 ADVERTISE_HOST=THIS_MACHINE_IP TERM_MEMORY_GIB=24</code>
+              <button type="button" data-copy-target="browser-command">Copy</button>
             </div>
-            <div class="command-block">
-              <div class="command-label">
-                <span>DEDICATED WORKER</span>
-                <button type="button" data-copy-target="worker-command">COPY</button>
-              </div>
-              <code id="worker-command">make join NODE_ID=my-node MEMORY_GIB=24 COORDINATOR_URL=http://COORDINATOR_IP:4173 ADVERTISE_HOST=THIS_MACHINE_IP</code>
+          </div>
+
+          <div class="chat-shell" id="cortex-chat">
+            <div class="chat-bar">
+              <strong>CortexGrid Chat</strong>
+              <span id="chat-status">LOCAL COMPUTE NOT CONNECTED</span>
             </div>
-            <table class="compact-table role-table">
-              <thead>
-                <tr>
-                  <th>ROLE</th>
-                  <th>QUERY</th>
-                  <th>SERVE</th>
-                  <th>EARN CTX</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>INTERACTIVE USER</td>
-                  <td>YES</td>
-                  <td>REQUIRED</td>
-                  <td>WHEN SELECTED</td>
-                </tr>
-                <tr>
-                  <td>DEDICATED WORKER</td>
-                  <td>NO</td>
-                  <td>CONTINUOUS</td>
-                  <td>WHEN SELECTED</td>
-                </tr>
-              </tbody>
-            </table>
+            <div
+              class="chat-log"
+              id="chat-log"
+              role="log"
+              aria-live="polite"
+              aria-label="CortexGrid Chat conversation"
+            >
+              <div class="chat-message system">
+                <span>System</span>
+                <p>
+                  Start the local compute bridge above. It will reconnect this
+                  page automatically.
+                </p>
+              </div>
+            </div>
+            <form class="chat-form" id="chat-form">
+              <label for="chat-prompt">Message</label>
+              <textarea
+                id="chat-prompt"
+                rows="3"
+                maxlength="8000"
+                placeholder="Connect local compute to begin"
+                disabled
+              ></textarea>
+              <div>
+                <button id="chat-new" type="button" disabled>New chat</button>
+                <button id="chat-submit" class="primary-button" type="submit" disabled>
+                  Run inference
+                </button>
+              </div>
+            </form>
           </div>
-        </section>
+        </div>
 
-        <section class="panel" aria-labelledby="runtime-heading">
-          <div class="panel-heading">
-            <h2 id="runtime-heading">ACTIVE RUNTIME</h2>
-            <span id="runtime-state">CHECKING</span>
+        <div id="worker-panel" hidden>
+          <p class="mode-description">
+            A dedicated worker stays available for model stages and inference.
+            It earns CTX at the same rate without opening the chat interface.
+          </p>
+          <div class="command">
+            <code id="worker-command">make join NODE_ID=my-node MEMORY_GIB=24 COORDINATOR_URL=http://COORDINATOR_IP:65534 ADVERTISE_HOST=THIS_MACHINE_IP</code>
+            <button type="button" data-copy-target="worker-command">Copy</button>
           </div>
-          <dl class="key-values" id="runtime-details">
-            <div><dt>MODEL</dt><dd id="model-name">—</dd></div>
-            <div><dt>MODEL ID</dt><dd id="model-id">—</dd></div>
-            <div><dt>VERSION</dt><dd id="model-version">—</dd></div>
-            <div><dt>PRECISION</dt><dd id="model-precision">—</dd></div>
-            <div><dt>PARAMETERS</dt><dd id="model-parameters">—</dd></div>
-            <div><dt>CONTEXT</dt><dd id="model-context">—</dd></div>
-            <div><dt>STAGES</dt><dd id="model-stage-count">—</dd></div>
-            <div><dt>RUNTIME</dt><dd id="runtime-engine">—</dd></div>
-          </dl>
-        </section>
-      </div>
+        </div>
 
-      <section class="panel" id="model">
-        <div class="panel-heading">
-          <h2>MODEL PLACEMENT</h2>
-          <span id="model-placement-summary">—</span>
-        </div>
-        <div class="placement-grid" id="model-placements">
-          <p class="loading-row">LOADING MODEL STAGES…</p>
-        </div>
+        <p class="reward-rule">
+          Rewards require completed, verified work. No CTX balance is needed
+          to join.
+        </p>
       </section>
 
-      <section class="panel" id="providers">
-        <div class="panel-heading">
-          <h2>PROVIDER REGISTRY</h2>
-          <span>LIVE LEASE + ASSIGNMENT STATE</span>
+      <details class="how" id="how">
+        <summary>
+          <span>
+            <strong>How it works</strong>
+            <small>
+              How machines receive model layers, run inference, and earn CTX
+            </small>
+          </span>
+          <span class="how-label">Open</span>
+        </summary>
+        <ol class="process">
+          <li>
+            <span>01</span>
+            <div>
+              <strong>Join</strong>
+              <p>CortexGrid measures the memory and compute you make available.</p>
+            </div>
+          </li>
+          <li>
+            <span>02</span>
+            <div>
+              <strong>Host a model slice</strong>
+              <p>The controller assigns and downloads layers that fit your machine.</p>
+            </div>
+          </li>
+          <li>
+            <span>03</span>
+            <div>
+              <strong>Run inference and earn</strong>
+              <p>
+                Complete signed work and receive
+                <b id="reward-rate">—</b>.
+              </p>
+            </div>
+          </li>
+        </ol>
+      </details>
+
+      <details class="technical" id="technical">
+        <summary>
+          <span>Network details</span>
+          <span class="expand-label">Open</span>
+        </summary>
+
+        <div class="technical-body">
+          <section class="detail-section">
+            <div class="detail-heading">
+              <div>
+                <h2>CTX ledger</h2>
+                <p>
+                  New CTX equals verified work multiplied by the fixed reward
+                  rate. Maximum supply is 1 billion CTX.
+                </p>
+              </div>
+              <a href="/api/chain">JSON</a>
+            </div>
+            <dl class="key-values">
+              <div><dt>Ledger height</dt><dd id="detail-height">—</dd></div>
+              <div><dt>Latest block</dt><dd id="detail-hash">—</dd></div>
+              <div><dt>Reward rate</dt><dd id="detail-rate">—</dd></div>
+              <div><dt>Issued for work</dt><dd id="detail-issued">—</dd></div>
+              <div><dt>Current supply</dt><dd id="detail-supply">—</dd></div>
+              <div><dt>Maximum supply</dt><dd id="detail-max-supply">—</dd></div>
+              <div><dt>Genesis allocation</dt><dd id="detail-genesis">—</dd></div>
+              <div><dt>Old-policy removal</dt><dd id="detail-burned">—</dd></div>
+            </dl>
+            <div class="ledger-check" id="ledger-check">
+              <span class="check-mark" id="check-mark" aria-hidden="true">…</span>
+              <div>
+                <h3 id="ledger-label">Checking ledger</h3>
+                <p>
+                  Verifies recorded proofs, rewards, transfers, and supply
+                  changes.
+                </p>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <caption>Recent blocks</caption>
+                <thead>
+                  <tr><th>Height</th><th>Event</th><th>Hash</th><th>Time</th></tr>
+                </thead>
+                <tbody id="block-rows">
+                  <tr><td colspan="4">Loading blocks…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="detail-section">
+            <div class="detail-heading">
+              <div>
+                <h2 id="model-name">Active model</h2>
+                <p id="model-summary">Loading model placement…</p>
+              </div>
+              <a href="/api/models">JSON</a>
+            </div>
+            <div class="placement-grid" id="model-placements">
+              <p>Loading model stages…</p>
+            </div>
+          </section>
+
+          <section class="detail-section">
+            <div class="detail-heading">
+              <div>
+                <h2>Providers</h2>
+                <p>
+                  Model stages are assigned from each node's declared memory
+                  and compute capacity.
+                </p>
+              </div>
+              <a href="/api/nodes">JSON</a>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Status</th><th>Node</th><th>Role</th><th>Memory</th>
+                    <th>Stages</th><th>Jobs</th><th>CTX</th><th>Control</th>
+                  </tr>
+                </thead>
+                <tbody id="provider-rows">
+                  <tr><td colspan="8">Loading providers…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="detail-section">
+            <div class="detail-heading">
+              <div>
+                <h2>Runtime</h2>
+                <p>
+                  Python coordinates the network. C++ and CUDA workers host
+                  model stages and execute inference.
+                </p>
+              </div>
+              <a href="/api/openapi.json">OpenAPI</a>
+            </div>
+            <dl class="key-values">
+              <div><dt>Protocol</dt><dd id="protocol-version">—</dd></div>
+              <div><dt>Model ID</dt><dd id="model-id">—</dd></div>
+              <div><dt>Version</dt><dd id="model-version">—</dd></div>
+              <div><dt>Precision</dt><dd id="model-precision">—</dd></div>
+              <div><dt>Parameters</dt><dd id="model-parameters">—</dd></div>
+              <div><dt>Context window</dt><dd id="model-context">—</dd></div>
+              <div><dt>Runtime</dt><dd id="runtime-engine">—</dd></div>
+              <div><dt>Runtime state</dt><dd id="runtime-state">—</dd></div>
+            </dl>
+          </section>
         </div>
-        <div class="table-scroll">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>STATE</th>
-                <th>NODE</th>
-                <th>ROLE</th>
-                <th>REGION</th>
-                <th>MEMORY</th>
-                <th>STAGES</th>
-                <th>LATENCY</th>
-                <th>JOBS</th>
-                <th>BALANCE</th>
-                <th>CONTROL</th>
-              </tr>
-            </thead>
-            <tbody id="provider-rows">
-              <tr><td colspan="10" class="loading-row">LOADING PROVIDERS…</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <div class="two-column" id="chain">
-        <section class="panel">
-          <div class="panel-heading">
-            <h2>CTX ACCOUNTING</h2>
-            <span id="chain-valid">VERIFYING</span>
-          </div>
-          <dl class="key-values">
-            <div><dt>TOTAL SUPPLY</dt><dd id="token-supply">—</dd></div>
-            <div><dt>MAX SUPPLY</dt><dd id="token-max-supply">—</dd></div>
-            <div><dt>PROVIDER REWARDS</dt><dd id="token-rewards">—</dd></div>
-            <div><dt>BURNED</dt><dd id="token-burned">—</dd></div>
-            <div><dt>CURRENT EPOCH</dt><dd id="token-epoch">—</dd></div>
-            <div><dt>EPOCH FEES</dt><dd id="token-epoch-fees">—</dd></div>
-            <div><dt>EPOCH ISSUANCE</dt><dd id="token-epoch-issuance">—</dd></div>
-            <div><dt>REMAINING BUDGET</dt><dd id="token-epoch-budget">—</dd></div>
-          </dl>
-          <div class="allocation">
-            <span style="--share: 85%">85% PROVIDERS</span>
-            <span style="--share: 10%">10% PROTOCOL</span>
-            <span style="--share: 5%">5% BURN</span>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-heading">
-            <h2>RECENT BLOCKS</h2>
-            <a href="/api/chain">FULL CHAIN</a>
-          </div>
-          <div class="table-scroll">
-            <table class="compact-table">
-              <thead>
-                <tr>
-                  <th>HEIGHT</th>
-                  <th>TYPE</th>
-                  <th>HASH</th>
-                  <th>TIME</th>
-                </tr>
-              </thead>
-              <tbody id="block-rows">
-                <tr><td colspan="4" class="loading-row">LOADING BLOCKS…</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-      </div>
-
-      <div class="two-column">
-        <section class="panel">
-          <div class="panel-heading">
-            <h2>EVENT LOG</h2>
-            <span>LAST 12 EVENTS</span>
-          </div>
-          <ol class="event-log" id="event-log">
-            <li class="loading-row">LOADING EVENTS…</li>
-          </ol>
-        </section>
-
-        <section class="panel">
-          <div class="panel-heading">
-            <h2>EXECUTION PATH</h2>
-            <span>CONTROL / EXECUTION / SETTLEMENT</span>
-          </div>
-          <pre class="ascii-flow" aria-label="CortexGrid execution architecture">
- CORTEXTERM              PYTHON CONTROL
- [use + serve] --------&gt; [admit / place / route]
-                               |
-                               v
-                         C++ / CUDA STAGES
-                         [00]--[01]--[...]--[NN]
-                               |
-                               v
-                         SIGNED RECEIPTS
-                               |
-                               v
-                         CTX BLOCK + REWARDS</pre>
-          <div class="resource-links">
-            <a href="/api/network">NETWORK JSON</a>
-            <a href="/api/models">MODEL JSON</a>
-            <a href="/api/economics">ECONOMICS JSON</a>
-            <a href="https://github.com/realbadbytes/CortexGrid">SOURCE</a>
-          </div>
-        </section>
-      </div>
+      </details>
     </main>
 
     <footer>
-      <span>CORTEXGRID DEVNET</span>
-      <span>LAST UPDATE: <time id="last-updated">—</time></span>
-      <span>DATA REFRESH: 8S</span>
+      <span>Updated <time id="last-updated">—</time></span>
+      <span>
+        <a href="/api/network">API</a>
+        <a href="https://github.com/realbadbytes/CortexGrid">Source</a>
+      </span>
     </footer>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>

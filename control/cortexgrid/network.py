@@ -22,6 +22,8 @@ from .blockchain import (
 from .economics import (
     CAPACITY_TARGET_REPLICAS,
     DEFAULT_PRICE_MICRO_PER_WORK_UNIT,
+    ECONOMICS_VERSION,
+    REWARD_RATE_MICRO_PER_WORK_UNIT,
     build_economics_record,
     validate_price,
 )
@@ -337,7 +339,9 @@ class CortexNetwork:
         )
         del self.events[100:]
 
-    def _route(self, shard_index: int) -> ComputeNode:
+    def _route(
+        self, shard_index: int, preferred_node_id: str | None = None
+    ) -> ComputeNode:
         self._expire_remote_nodes()
         candidates = [
             node
@@ -346,10 +350,20 @@ class CortexNetwork:
         ]
         if not candidates:
             raise RuntimeError(f"no online replica for shard {shard_index}")
+        if preferred_node_id is not None:
+            preferred = next(
+                (
+                    node
+                    for node in candidates
+                    if node.id == preferred_node_id
+                ),
+                None,
+            )
+            if preferred is not None:
+                return preferred
         return min(
             candidates,
             key=lambda node: (
-                node.price_micro_per_work_unit,
                 node.completed_jobs,
                 node.network_latency_ms,
                 node.id,
@@ -667,8 +681,19 @@ class CortexNetwork:
                     "tensorCache": "provider-owned",
                 },
                 "economics": {
-                    "priceMicroPerWorkUnit": price_micro_per_work_unit,
-                    "priceUnit": "micro-CTX/model-compute-unit-weighted-token",
+                    "version": ECONOMICS_VERSION,
+                    "rewardRateMicroPerWorkUnit": (
+                        REWARD_RATE_MICRO_PER_WORK_UNIT
+                    ),
+                    "rewardUnit": (
+                        "verified model-compute-unit-weighted-token"
+                    ),
+                    "rewardEligibility": (
+                        "signed work in a finalized inference block"
+                    ),
+                    "rewardDistribution": (
+                        "fixed rate multiplied by this node's verified work"
+                    ),
                 },
                 "lease": {
                     "heartbeatSeconds": 10,
@@ -867,13 +892,20 @@ class CortexNetwork:
         return f"{body}\n\nBlock proof: {proof_root[:16]}…"
 
     def _execute_synthetic_route(
-        self, inference_id: str, input_digest: str
+        self,
+        inference_id: str,
+        input_digest: str,
+        *,
+        preferred_node_id: str | None = None,
     ) -> tuple[list[ExecutionReceipt], list[dict], str, dict]:
         activation_digest = input_digest
         receipts: list[ExecutionReceipt] = []
         route: list[dict] = []
         for shard in self.model["shards"]:
-            node = self._route(shard["index"])
+            node = self._route(
+                shard["index"],
+                preferred_node_id=preferred_node_id,
+            )
             stage_started = time.perf_counter()
             receipt = node.worker.execute(
                 request_id=inference_id,
@@ -910,12 +942,21 @@ class CortexNetwork:
         }
 
     def _execute_real_route(
-        self, inference_id: str, prompt: str, input_digest: str
+        self,
+        inference_id: str,
+        prompt: str,
+        input_digest: str,
+        *,
+        preferred_node_id: str | None = None,
     ) -> tuple[list[ExecutionReceipt], list[dict], str, dict]:
         if self.model_runtime is None:
             raise RuntimeError("real model runtime is unavailable")
         selected_nodes = [
-            self._route(shard["index"]) for shard in self.model["shards"]
+            self._route(
+                shard["index"],
+                preferred_node_id=preferred_node_id,
+            )
+            for shard in self.model["shards"]
         ]
         if len({node.id for node in selected_nodes}) != len(selected_nodes):
             raise RuntimeError("distributed route requires distinct execution nodes")
@@ -1074,7 +1115,7 @@ class CortexNetwork:
     ) -> ComputeNode:
         if not isinstance(envelope, dict):
             raise ValueError(
-                "inference requires an online CortexTerm compute participant"
+                "inference requires an online CortexGrid Chat compute participant"
             )
         request = envelope["request"]
         if not isinstance(request, dict):
@@ -1088,7 +1129,7 @@ class CortexNetwork:
             or node.role != "interactive-user"
         ):
             raise ValueError(
-                "inference requires an interactive CortexTerm compute participant"
+                "inference requires an interactive CortexGrid Chat compute participant"
             )
         self._expire_remote_nodes()
         if node.status != "online":
@@ -1139,19 +1180,40 @@ class CortexNetwork:
                 model_id=model_id,
                 envelope=participation,
             )
-            result = self.run_inference(prompt, model_id)
+            result = self.run_inference(
+                prompt,
+                model_id,
+                preferred_node_id=participant.id,
+            )
+            participant_reward = sum(
+                float(transaction.get("feeAmount", 0))
+                + float(transaction.get("issuanceAmount", 0))
+                for transaction in result["block"]["transactions"]
+                if (
+                    transaction["type"] == "provider_reward"
+                    and participant.id in transaction.get("nodeIds", [])
+                )
+            )
             result["access"] = {
                 "mode": "compute-participant",
                 "computeContributionRequired": True,
                 "participantNodeId": participant.id,
                 "participantRewardAddress": participant.worker.reward_address,
+                "participantSelected": True,
+                "participantReward": round(participant_reward, 6),
                 "endUserWalletRequired": False,
                 "endUserFee": 0,
                 "symbol": TOKEN_SYMBOL,
             }
             return result
 
-    def run_inference(self, prompt: str, model_id: str | None = None) -> dict:
+    def run_inference(
+        self,
+        prompt: str,
+        model_id: str | None = None,
+        *,
+        preferred_node_id: str | None = None,
+    ) -> dict:
         if not isinstance(prompt, str) or len(prompt.strip()) < 2:
             raise ValueError("prompt must contain at least 2 characters")
         if len(prompt) > 8_000:
@@ -1168,12 +1230,19 @@ class CortexNetwork:
             prompt_digest = sha256(prompt.strip())
             if self.model_runtime is None:
                 receipts, route, activation_digest, runtime = (
-                    self._execute_synthetic_route(inference_id, input_digest)
+                    self._execute_synthetic_route(
+                        inference_id,
+                        input_digest,
+                        preferred_node_id=preferred_node_id,
+                    )
                 )
             else:
                 receipts, route, activation_digest, runtime = (
                     self._execute_real_route(
-                        inference_id, prompt.strip(), input_digest
+                        inference_id,
+                        prompt.strip(),
+                        input_digest,
+                        preferred_node_id=preferred_node_id,
                     )
                 )
 
@@ -1200,20 +1269,15 @@ class CortexNetwork:
             )
             provider_compute_units: dict[str, int] = {}
             provider_rates_micro: dict[str, int] = {}
-            for receipt, route_stage in zip(receipts, route):
+            for receipt in receipts:
                 address = address_from_public_key(receipt.public_key)
                 provider_compute_units[address] = (
                     provider_compute_units.get(address, 0)
                     + int(receipt.compute_units)
                 )
-                node = self.nodes[route_stage["nodeId"]]
-                existing_rate = provider_rates_micro.setdefault(
-                    address, node.price_micro_per_work_unit
+                provider_rates_micro.setdefault(
+                    address, DEFAULT_PRICE_MICRO_PER_WORK_UNIT
                 )
-                if existing_rate != node.price_micro_per_work_unit:
-                    raise RuntimeError(
-                        "one provider identity cannot use multiple prices in a route"
-                    )
             ready_capacity_units, target_capacity_units = (
                 self._ready_capacity_units()
             )
@@ -1252,64 +1316,24 @@ class CortexNetwork:
                 for transaction in block["transactions"]
                 if transaction["type"] == "provider_reward"
             ]
-            inference_fee_transaction = next(
-                transaction
-                for transaction in block["transactions"]
-                if transaction["type"] == "inference_fee"
+            issued_micro = sum(
+                transaction["issuanceAmountMicro"]
+                for transaction in reward_transactions
             )
             accounting = {
                 "symbol": TOKEN_SYMBOL,
                 "economicsVersion": economics["version"],
                 "endUserFee": 0,
-                "sponsorFee": tokens(
-                    inference_fee_transaction["amountMicro"]
+                "providerRewards": tokens(issued_micro),
+                "issuance": tokens(issued_micro),
+                "verifiedWorkUnits": economics["metering"][
+                    "meteredWorkUnits"
+                ],
+                "rewardRate": tokens(
+                    economics["reward"]["rateMicroPerWorkUnit"]
                 ),
-                "fee": tokens(inference_fee_transaction["amountMicro"]),
-                "burned": tokens(
-                    sum(
-                        transaction["amountMicro"]
-                        for transaction in block["transactions"]
-                        if transaction["type"] == "burn"
-                    )
-                ),
-                "protocolFee": tokens(
-                    sum(
-                        transaction["amountMicro"]
-                        for transaction in block["transactions"]
-                        if transaction["type"] == "protocol_fee"
-                    )
-                ),
-                "providerFeeRewards": tokens(
-                    sum(
-                        transaction["feeAmountMicro"]
-                        for transaction in reward_transactions
-                    )
-                ),
-                "providerRewards": tokens(
-                    sum(
-                        transaction["feeAmountMicro"]
-                        + transaction["issuanceAmountMicro"]
-                        for transaction in reward_transactions
-                    )
-                ),
-                "quotedProviderCost": tokens(
-                    economics["pricing"]["quotedProviderCostMicro"]
-                ),
-                "issuance": tokens(
-                    sum(
-                        transaction["issuanceAmountMicro"]
-                        for transaction in reward_transactions
-                    )
-                ),
-                "epoch": economics["emission"]["epoch"],
-                "epochBudget": tokens(
-                    economics["emission"]["epochBudgetMicro"]
-                ),
-                "capacityUnlockPercent": (
-                    economics["emission"]["capacityUnlockBps"] / 100
-                ),
-                "demandUnlockPercent": (
-                    economics["emission"]["demandUnlockBps"] / 100
+                "rewardUnit": (
+                    "CTX per verified model-compute-unit-weighted-token"
                 ),
             }
             rewards_by_address = {

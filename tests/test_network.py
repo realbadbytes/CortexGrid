@@ -8,10 +8,15 @@ from pathlib import Path
 
 from cortexgrid.blockchain import (
     GENESIS_SUPPLY_MICRO,
+    MAX_SUPPLY_MICRO,
     TOKEN_UNIT,
+    inference_transactions,
     verify_proof_bundle,
 )
-from cortexgrid.economics import ECONOMICS_VERSION
+from cortexgrid.economics import (
+    ECONOMICS_VERSION,
+    REWARD_RATE_MICRO_PER_WORK_UNIT,
+)
 from cortexgrid.network import CortexNetwork
 from cortexgrid.wallet import Wallet
 
@@ -50,16 +55,33 @@ class NetworkTests(unittest.TestCase):
         accounting = result["accounting"]
         self.assertEqual(accounting["economicsVersion"], ECONOMICS_VERSION)
         self.assertEqual(accounting["endUserFee"], 0)
-        self.assertGreater(accounting["sponsorFee"], 0)
-        self.assertLess(accounting["sponsorFee"], 1.0)
-        self.assertGreater(accounting["providerFeeRewards"], 0)
-        self.assertGreater(accounting["issuance"], 0)
-        self.assertEqual(accounting["capacityUnlockPercent"], 100.0)
+        expected_issuance_micro = (
+            accounting["verifiedWorkUnits"]
+            * REWARD_RATE_MICRO_PER_WORK_UNIT
+        )
+        self.assertEqual(
+            accounting["issuance"],
+            expected_issuance_micro / TOKEN_UNIT,
+        )
+        self.assertEqual(accounting["providerRewards"], accounting["issuance"])
+        self.assertEqual(
+            accounting["rewardRate"],
+            REWARD_RATE_MICRO_PER_WORK_UNIT / TOKEN_UNIT,
+        )
         transactions = self.network.chain.blocks[-1]["transactions"]
-        burned_micro = next(
-            transaction["amountMicro"]
-            for transaction in transactions
-            if transaction["type"] == "burn"
+        self.assertFalse(
+            any(
+                transaction["type"]
+                in {"inference_fee", "protocol_fee", "burn"}
+                for transaction in transactions
+            )
+        )
+        self.assertTrue(
+            all(
+                transaction["type"] == "provider_reward"
+                and transaction["feeAmountMicro"] == 0
+                for transaction in transactions
+            )
         )
         issuance_micro = sum(
             transaction["issuanceAmountMicro"]
@@ -68,7 +90,16 @@ class NetworkTests(unittest.TestCase):
         )
         self.assertEqual(
             self.network.chain.total_supply_micro,
-            GENESIS_SUPPLY_MICRO - burned_micro + issuance_micro,
+            GENESIS_SUPPLY_MICRO + issuance_micro,
+        )
+        self.assertEqual(issuance_micro, expected_issuance_micro)
+        self.assertEqual(
+            self.network.chain.snapshot()["token"]["genesisSupply"],
+            GENESIS_SUPPLY_MICRO / TOKEN_UNIT,
+        )
+        self.assertEqual(
+            self.network.chain.snapshot()["token"]["totalIssued"],
+            expected_issuance_micro / TOKEN_UNIT,
         )
         economics = self.network.chain.blocks[-1]["payload"]["economics"]
         self.assertEqual(
@@ -77,9 +108,10 @@ class NetworkTests(unittest.TestCase):
         )
         for transaction in transactions:
             if transaction["type"] == "provider_reward":
-                self.assertGreaterEqual(
-                    transaction["feeAmountMicro"],
-                    transaction["quotedAmountMicro"],
+                self.assertEqual(
+                    transaction["issuanceAmountMicro"],
+                    transaction["workUnits"]
+                    * REWARD_RATE_MICRO_PER_WORK_UNIT,
                 )
 
     def test_replica_routing_survives_one_offline_node(self) -> None:
@@ -106,6 +138,27 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(self.network.chain.balance_of(recipient.address), amount)
         self.assertEqual(self.network.chain.total_supply_micro, starting_supply)
         self.assertTrue(self.network.chain.validate()["valid"])
+
+    def test_useful_work_reward_is_clipped_at_supply_cap(self) -> None:
+        result = self.network.run_inference(
+            "Create a valid proof for maximum supply testing."
+        )
+        economics = self.network.chain.blocks[-1]["payload"]["economics"]
+
+        transactions = inference_transactions(
+            proof=result["proof"],
+            payer=self.network.demo_wallet.address,
+            inference_id="inf_cap_test",
+            current_supply_micro=MAX_SUPPLY_MICRO - 1,
+            economics=economics,
+        )
+        issued = sum(
+            transaction["issuanceAmountMicro"]
+            for transaction in transactions
+            if transaction["type"] == "provider_reward"
+        )
+
+        self.assertEqual(issued, 1)
 
     def test_consensus_rejects_forged_reward_amount(self) -> None:
         self.network.run_inference("Create a block for tamper testing.")

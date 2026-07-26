@@ -17,6 +17,8 @@ from urllib.parse import parse_qs, urlparse
 
 from .economics import (
     DEFAULT_PRICE_MICRO_PER_WORK_UNIT,
+    ECONOMICS_VERSION,
+    REWARD_RATE_MICRO_PER_WORK_UNIT,
     validate_price,
 )
 from .executor import NativeWorker
@@ -139,6 +141,9 @@ class ProviderNode:
                 self.operator_token + "\n", encoding="utf-8"
             )
             operator_token_path.chmod(0o600)
+        self.browser_token = secrets.token_urlsafe(32)
+        coordinator = urlparse(self.coordinator_url)
+        self.browser_origin = f"{coordinator.scheme}://{coordinator.netloc}"
         self.wallet = Wallet.load_or_create(self.data_dir / "node_wallet.json")
         self.worker = NativeWorker(
             self.node_id, self.executor_path, wallet=self.wallet
@@ -281,8 +286,9 @@ class ProviderNode:
             or assignment["role"] != self.role
             or assignment["rewardAddress"] != self.reward_address
             or assignment["runtime"]["rpcEndpoint"] != self.rpc_endpoint
-            or assignment["economics"]["priceMicroPerWorkUnit"]
-            != self.price_micro_per_work_unit
+            or assignment["economics"]["version"] != ECONOMICS_VERSION
+            or assignment["economics"]["rewardRateMicroPerWorkUnit"]
+            != REWARD_RATE_MICRO_PER_WORK_UNIT
         ):
             raise RuntimeError("coordinator assignment does not match this provider")
 
@@ -327,14 +333,14 @@ class ProviderNode:
     def authorize_inference(
         self, prompt: str, model_id: str | None = None
     ) -> dict:
-        """Sign one inference request while this interactive node is online."""
+        """Sign one CortexGrid Chat request while this node is online."""
         if self.role != "interactive-user":
             raise RuntimeError(
                 "dedicated workers provide compute but cannot request inference"
             )
         if not self.joined or self.assignment is None:
             raise RuntimeError(
-                "CortexTerm must be online as a compute participant"
+                "CortexGrid Chat must be online as a compute participant"
             )
         request = {
             "protocol": JOIN_PROTOCOL,
@@ -351,6 +357,25 @@ class ProviderNode:
                 self.wallet, INFERENCE_ACCESS_DOMAIN, request
             ),
         }
+
+    def browser_inference(
+        self, prompt: str, model_id: str | None = None
+    ) -> dict:
+        if not isinstance(prompt, str) or len(prompt.strip()) < 2:
+            raise ValueError("prompt must contain at least 2 characters")
+        if len(prompt) > 8_000:
+            raise ValueError("prompt exceeds the 8,000 character limit")
+        payload = {
+            "prompt": prompt,
+            "participation": self.authorize_inference(prompt, model_id),
+        }
+        if model_id:
+            payload["modelId"] = model_id
+        return request_json(
+            f"{self.coordinator_url}/api/inference",
+            payload=payload,
+            timeout=180,
+        )
 
     def heartbeat(self) -> dict:
         if self.assignment is None:
@@ -670,6 +695,11 @@ class ProviderApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
+        origin = self.headers.get("Origin", "")
+        if origin == self.server.provider.browser_origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -691,10 +721,52 @@ class ProviderApiHandler(BaseHTTPRequestHandler):
         if not secrets.compare_digest(supplied, expected):
             raise PermissionError("operator token is required")
 
+    def _require_browser(self) -> None:
+        if self.server.provider.role != "interactive-user":
+            raise PermissionError("browser chat requires an interactive node")
+        supplied = self.headers.get("Authorization", "")
+        expected = f"Bearer {self.server.provider.browser_token}"
+        if not secrets.compare_digest(supplied, expected):
+            raise PermissionError("browser bridge token is required")
+
+    def do_OPTIONS(self) -> None:
+        origin = self.headers.get("Origin", "")
+        path = urlparse(self.path).path
+        if (
+            origin != self.server.provider.browser_origin
+            or path not in {"/v1/browser/status", "/v1/browser/inference"}
+        ):
+            self.send_response(403)
+            self.end_headers()
+            return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header(
+            "Access-Control-Allow-Headers", "Authorization, Content-Type"
+        )
+        if (
+            self.headers.get("Access-Control-Request-Private-Network")
+            == "true"
+        ):
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Vary", "Origin")
+        self.end_headers()
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         try:
-            if parsed.path == "/v1/status":
+            if parsed.path == "/v1/browser/status":
+                self._require_browser()
+                self._json(
+                    200,
+                    {
+                        "connected": self.server.provider.joined,
+                        "provider": self.server.provider.snapshot(),
+                    },
+                )
+            elif parsed.path == "/v1/status":
                 challenge = parse_qs(parsed.query).get("challenge", [""])[0]
                 if len(challenge) < 16:
                     raise ValueError("a status challenge is required")
@@ -721,7 +793,16 @@ class ProviderApiHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             body = self._body()
-            if self.path == "/v1/execute":
+            if self.path == "/v1/browser/inference":
+                self._require_browser()
+                self._json(
+                    200,
+                    self.server.provider.browser_inference(
+                        body.get("prompt", ""),
+                        body.get("modelId"),
+                    ),
+                )
+            elif self.path == "/v1/execute":
                 self._json(200, self.server.provider.execute(body))
             elif self.path == "/v1/attest":
                 self._json(200, self.server.provider.attest(body))
@@ -759,7 +840,7 @@ class ProviderHttpServer(ThreadingHTTPServer):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Join a CortexGrid inference network")
-    parser.add_argument("--coordinator", default="http://127.0.0.1:4173")
+    parser.add_argument("--coordinator", default="http://127.0.0.1:65534")
     parser.add_argument("--coordinator-public-key")
     parser.add_argument("--node-id", required=True)
     parser.add_argument("--name")
@@ -771,7 +852,7 @@ def main() -> None:
         "--price-micro-per-work-unit",
         type=int,
         default=DEFAULT_PRICE_MICRO_PER_WORK_UNIT,
-        help="provider bid in micro-CTX per weighted model work unit",
+        help="legacy join field; ignored by CTX economics v4",
     )
     parser.add_argument("--listen-host", default="0.0.0.0")
     parser.add_argument("--advertise-host", required=True)

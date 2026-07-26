@@ -6,24 +6,45 @@ TOKEN_SYMBOL = "CTX"
 MAX_SUPPLY_MICRO = 1_000_000_000 * TOKEN_UNIT
 GENESIS_SUPPLY_MICRO = 1_000_000 * TOKEN_UNIT
 
-ECONOMICS_VERSION = "ctx-economics-v2"
+LEGACY_ECONOMICS_VERSION = "ctx-economics-v2"
+LEGACY_BLOCK_ECONOMICS_VERSION = "ctx-economics-v3"
+ECONOMICS_VERSION = "ctx-economics-v4"
+
+PREFILL_WEIGHT = 1
+DECODE_WEIGHT = 2
+
+# One rule for all new rewards: 100 micro-CTX for each signed, verified work
+# unit. One work unit is one model compute unit applied to one weighted token.
+REWARD_RATE_MICRO_PER_WORK_UNIT = 100
+
+# Provider prices remain accepted by the join protocol so old clients can
+# connect, but v4 reward calculation does not use them.
 PRICE_MIN_MICRO_PER_WORK_UNIT = 1
 PRICE_MAX_MICRO_PER_WORK_UNIT = 10_000
 DEFAULT_PRICE_MICRO_PER_WORK_UNIT = 10
 
-PREFILL_WEIGHT = 1
-DECODE_WEIGHT = 2
-MIN_PROVIDER_POOL_MICRO = 50_000
-BURN_BPS = 500
-PROTOCOL_BPS = 1_000
-PROVIDER_BPS = 10_000 - BURN_BPS - PROTOCOL_BPS
+# v3 constants are retained only to replay existing devnet blocks.
+V3_MIN_PROVIDER_POOL_MICRO = 50_000
+V3_BURN_BPS = 0
+V3_PROTOCOL_BPS = 1_000
+V3_PROVIDER_BPS = 9_000
+V3_WORK_REWARD_RESERVE_MICRO = MAX_SUPPLY_MICRO - GENESIS_SUPPLY_MICRO
+V3_WORK_REWARD_HALVING_INFERENCES = 1_000_000
+V3_INITIAL_WORK_REWARD_MICRO = V3_WORK_REWARD_RESERVE_MICRO // (
+    2 * V3_WORK_REWARD_HALVING_INFERENCES
+)
 
+# v2 constants are retained only to replay existing devnet blocks.
 INFERENCES_PER_EPOCH = 1_000
 EMISSION_HALVING_EPOCHS = 100
 INITIAL_EPOCH_EMISSION_MICRO = 100 * TOKEN_UNIT
 MAX_SUBSIDY_BPS_OF_PROVIDER_FEES = 2_000
 EPOCH_DEMAND_TARGET_MICRO = 100 * TOKEN_UNIT
 CAPACITY_TARGET_REPLICAS = 2
+V2_MIN_PROVIDER_POOL_MICRO = 50_000
+V2_BURN_BPS = 500
+V2_PROTOCOL_BPS = 1_000
+V2_PROVIDER_BPS = 8_500
 
 
 def tokens(amount_micro: int) -> float:
@@ -37,10 +58,19 @@ def ceil_div(numerator: int, denominator: int) -> int:
 
 
 def scheduled_epoch_emission_micro(epoch: int) -> int:
+    """Return the historical v2 epoch ceiling for ledger replay."""
     if epoch < 0:
         raise ValueError("epoch cannot be negative")
     halvings = epoch // EMISSION_HALVING_EPOCHS
     return INITIAL_EPOCH_EMISSION_MICRO >> halvings
+
+
+def scheduled_work_reward_micro(inference_index: int) -> int:
+    """Return the historical v3 block reward for ledger replay."""
+    if inference_index < 0:
+        raise ValueError("inference index cannot be negative")
+    halvings = inference_index // V3_WORK_REWARD_HALVING_INFERENCES
+    return V3_INITIAL_WORK_REWARD_MICRO >> halvings
 
 
 def metered_work_units(
@@ -69,6 +99,44 @@ def validate_price(price_micro_per_work_unit: object) -> int:
     return price
 
 
+def _legacy_pricing(
+    *,
+    provider_work: dict[str, int],
+    provider_rates_micro: dict[str, int],
+    minimum_provider_pool_micro: int,
+    burn_bps: int,
+    protocol_bps: int,
+    provider_bps: int,
+) -> dict:
+    normalized_rates = {
+        address: validate_price(provider_rates_micro[address])
+        for address in sorted(provider_work)
+    }
+    quoted_provider_cost_micro = sum(
+        provider_work[address] * normalized_rates[address]
+        for address in provider_work
+    )
+    target_provider_pool_micro = max(
+        minimum_provider_pool_micro, quoted_provider_cost_micro
+    )
+    fee_micro = ceil_div(target_provider_pool_micro * 10_000, provider_bps)
+    burn_micro = fee_micro * burn_bps // 10_000
+    protocol_micro = fee_micro * protocol_bps // 10_000
+    provider_pool_micro = fee_micro - burn_micro - protocol_micro
+    return {
+        "providerRatesMicroPerWorkUnit": normalized_rates,
+        "quotedProviderCostMicro": quoted_provider_cost_micro,
+        "minimumProviderPoolMicro": minimum_provider_pool_micro,
+        "feeMicro": fee_micro,
+        "burnBps": burn_bps,
+        "protocolBps": protocol_bps,
+        "providerBps": provider_bps,
+        "burnMicro": burn_micro,
+        "protocolMicro": protocol_micro,
+        "providerPoolMicro": provider_pool_micro,
+    }
+
+
 def build_economics_record(
     *,
     inference_index: int,
@@ -82,37 +150,86 @@ def build_economics_record(
     target_capacity_units: int,
     epoch_fees_before_micro: int,
     epoch_issuance_before_micro: int,
+    version: str = ECONOMICS_VERSION,
 ) -> dict:
     if inference_index < 0:
         raise ValueError("inference index cannot be negative")
     if kernel_micros < 0:
         raise ValueError("kernel time cannot be negative")
     if set(provider_rates_micro) != set(provider_compute_units):
-        raise ValueError("every participating provider needs exactly one price")
+        raise ValueError("every participating provider needs exactly one identity")
     if sum(provider_compute_units.values()) != model_compute_units:
         raise ValueError("provider work does not equal model work")
-    normalized_rates = {
-        address: validate_price(price)
-        for address, price in sorted(provider_rates_micro.items())
-    }
+
     provider_work = {
         address: metered_work_units(
             int(provider_compute_units[address]), input_tokens, output_tokens
         )
         for address in sorted(provider_compute_units)
     }
-    quoted_provider_cost_micro = sum(
-        provider_work[address] * normalized_rates[address]
-        for address in provider_work
-    )
-    target_provider_pool_micro = max(
-        MIN_PROVIDER_POOL_MICRO, quoted_provider_cost_micro
-    )
-    fee_micro = ceil_div(target_provider_pool_micro * 10_000, PROVIDER_BPS)
-    burn_micro = fee_micro * BURN_BPS // 10_000
-    protocol_micro = fee_micro * PROTOCOL_BPS // 10_000
-    provider_pool_micro = fee_micro - burn_micro - protocol_micro
+    total_work = sum(provider_work.values())
+    metering = {
+        "modelComputeUnits": model_compute_units,
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
+        "kernelMicros": kernel_micros,
+        "prefillWeight": PREFILL_WEIGHT,
+        "decodeWeight": DECODE_WEIGHT,
+        "meteredWorkUnits": total_work,
+        "providerWorkUnits": provider_work,
+    }
 
+    if version == ECONOMICS_VERSION:
+        return {
+            "version": version,
+            "metering": metering,
+            "reward": {
+                "rateMicroPerWorkUnit": REWARD_RATE_MICRO_PER_WORK_UNIT,
+                "requestedIssuanceMicro": (
+                    total_work * REWARD_RATE_MICRO_PER_WORK_UNIT
+                ),
+            },
+        }
+
+    if version == LEGACY_BLOCK_ECONOMICS_VERSION:
+        pricing = _legacy_pricing(
+            provider_work=provider_work,
+            provider_rates_micro=provider_rates_micro,
+            minimum_provider_pool_micro=V3_MIN_PROVIDER_POOL_MICRO,
+            burn_bps=V3_BURN_BPS,
+            protocol_bps=V3_PROTOCOL_BPS,
+            provider_bps=V3_PROVIDER_BPS,
+        )
+        reward_micro = scheduled_work_reward_micro(inference_index)
+        return {
+            "version": version,
+            "metering": metering,
+            "pricing": pricing,
+            "emission": {
+                "schedule": "verified-inference-halving-v1",
+                "inferenceIndex": inference_index,
+                "halvingIndex": (
+                    inference_index // V3_WORK_REWARD_HALVING_INFERENCES
+                ),
+                "halvingIntervalInferences": (
+                    V3_WORK_REWARD_HALVING_INFERENCES
+                ),
+                "blockRewardMicro": reward_micro,
+                "requestedIssuanceMicro": reward_micro,
+            },
+        }
+
+    if version != LEGACY_ECONOMICS_VERSION:
+        raise ValueError("unsupported CTX economics version")
+
+    pricing = _legacy_pricing(
+        provider_work=provider_work,
+        provider_rates_micro=provider_rates_micro,
+        minimum_provider_pool_micro=V2_MIN_PROVIDER_POOL_MICRO,
+        burn_bps=V2_BURN_BPS,
+        protocol_bps=V2_PROTOCOL_BPS,
+        provider_bps=V2_PROVIDER_BPS,
+    )
     epoch = inference_index // INFERENCES_PER_EPOCH
     epoch_offset = inference_index % INFERENCES_PER_EPOCH
     epoch_budget_micro = scheduled_epoch_emission_micro(epoch)
@@ -122,12 +239,14 @@ def build_economics_record(
     capacity_unlock_bps = ready_capacity_units * 10_000 // target_capacity_units
     demand_unlock_bps = min(
         10_000,
-        max(0, epoch_fees_before_micro + fee_micro)
+        max(0, epoch_fees_before_micro + pricing["feeMicro"])
         * 10_000
         // EPOCH_DEMAND_TARGET_MICRO,
     )
     subsidy_ceiling_micro = (
-        provider_pool_micro * MAX_SUBSIDY_BPS_OF_PROVIDER_FEES // 10_000
+        pricing["providerPoolMicro"]
+        * MAX_SUBSIDY_BPS_OF_PROVIDER_FEES
+        // 10_000
     )
     requested_issuance_micro = (
         subsidy_ceiling_micro
@@ -139,31 +258,10 @@ def build_economics_record(
     epoch_remaining_micro = max(
         0, epoch_budget_micro - epoch_issuance_before_micro
     )
-
     return {
-        "version": ECONOMICS_VERSION,
-        "metering": {
-            "modelComputeUnits": model_compute_units,
-            "inputTokens": input_tokens,
-            "outputTokens": output_tokens,
-            "kernelMicros": kernel_micros,
-            "prefillWeight": PREFILL_WEIGHT,
-            "decodeWeight": DECODE_WEIGHT,
-            "meteredWorkUnits": sum(provider_work.values()),
-            "providerWorkUnits": provider_work,
-        },
-        "pricing": {
-            "providerRatesMicroPerWorkUnit": normalized_rates,
-            "quotedProviderCostMicro": quoted_provider_cost_micro,
-            "minimumProviderPoolMicro": MIN_PROVIDER_POOL_MICRO,
-            "feeMicro": fee_micro,
-            "burnBps": BURN_BPS,
-            "protocolBps": PROTOCOL_BPS,
-            "providerBps": PROVIDER_BPS,
-            "burnMicro": burn_micro,
-            "protocolMicro": protocol_micro,
-            "providerPoolMicro": provider_pool_micro,
-        },
+        "version": version,
+        "metering": metering,
+        "pricing": pricing,
         "emission": {
             "epoch": epoch,
             "epochOffset": epoch_offset,
@@ -185,26 +283,11 @@ def build_economics_record(
 def public_policy() -> dict:
     return {
         "version": ECONOMICS_VERSION,
-        "pricing": {
-            "unit": "model-compute-unit × weighted-token",
-            "defaultProviderPriceMicroPerWorkUnit": (
-                DEFAULT_PRICE_MICRO_PER_WORK_UNIT
-            ),
-            "minimumProviderPool": tokens(MIN_PROVIDER_POOL_MICRO),
-            "burnPercent": BURN_BPS / 100,
-            "protocolPercent": PROTOCOL_BPS / 100,
-            "providerPercent": PROVIDER_BPS / 100,
-            "prefillWeight": PREFILL_WEIGHT,
-            "decodeWeight": DECODE_WEIGHT,
-        },
-        "emission": {
-            "inferencesPerEpoch": INFERENCES_PER_EPOCH,
-            "initialEpochBudget": tokens(INITIAL_EPOCH_EMISSION_MICRO),
-            "halvingEpochs": EMISSION_HALVING_EPOCHS,
-            "demandTargetPerEpoch": tokens(EPOCH_DEMAND_TARGET_MICRO),
-            "capacityTargetReplicas": CAPACITY_TARGET_REPLICAS,
-            "maxSubsidyPercentOfProviderFees": (
-                MAX_SUBSIDY_BPS_OF_PROVIDER_FEES / 100
-            ),
+        "reward": {
+            "rate": tokens(REWARD_RATE_MICRO_PER_WORK_UNIT),
+            "rateMicroPerWorkUnit": REWARD_RATE_MICRO_PER_WORK_UNIT,
+            "unit": "verified model-compute-unit × weighted-token",
+            "eligibility": "signed work in a finalized inference block",
+            "distribution": "each provider is paid for its own verified work",
         },
     }

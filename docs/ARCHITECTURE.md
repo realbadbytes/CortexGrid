@@ -3,15 +3,15 @@
 ## Devnet data flow
 
 ```text
-1. A wallet-free end user submits a prompt through CortexTerm or the HTTP API
+1. CortexGrid Chat signs a prompt through an online interactive compute node
 2. Python selects one online replica for each of two model stages
 3. A persistent llama.cpp gateway loads tensors across both RPC participants
 4. The real SmolLM2 model performs prefill and autoregressive generation
 5. Both participant identities sign chained participation attestations
 6. Python verifies every signature and commitment link
 7. Receipt digests form a Merkle root
-8. One useful-work block settles the metered gateway fee, burn, rewards, and
-   capacity-and-demand-limited issuance
+8. One useful-work block mints a fixed amount of CTX per verified work unit
+   directly to the providers with valid receipts
 ```
 
 The chain accepts an inference block only when:
@@ -21,9 +21,9 @@ The chain accepts an inference block only when:
 - stages are complete and ordered;
 - request, model, and output commitments match the block;
 - reward recipients are derived from receipt public keys;
-- the fee split and work-weighted rewards are exact;
+- each provider reward equals its verified work multiplied by the fixed rate;
 - capped issuance does not exceed the maximum supply;
-- metered prices, capacity/demand unlocks, and epoch limits recompute exactly;
+- metered work and rewards recompute exactly;
 - balances conserve the resulting total supply.
 
 Transfers use Ed25519 signatures and per-wallet nonces. They cannot invoke the

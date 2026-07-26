@@ -7,6 +7,10 @@ import unittest
 from pathlib import Path
 
 from cortexgrid.join_protocol import request_json
+from cortexgrid.economics import (
+    ECONOMICS_VERSION,
+    REWARD_RATE_MICRO_PER_WORK_UNIT,
+)
 from cortexgrid.network import CortexNetwork
 from cortexgrid.node_daemon import ProviderNode
 from cortexgrid.provider_cli import ProviderOperatorApi
@@ -64,10 +68,14 @@ class RemoteJoinTests(unittest.TestCase):
                 self.assertEqual(joined["status"], "ready")
                 self.assertEqual(joined["assignment"]["shard"]["index"], 0)
                 self.assertEqual(
+                    joined["assignment"]["economics"]["version"],
+                    ECONOMICS_VERSION,
+                )
+                self.assertEqual(
                     joined["assignment"]["economics"][
-                        "priceMicroPerWorkUnit"
+                        "rewardRateMicroPerWorkUnit"
                     ],
-                    7,
+                    REWARD_RATE_MICRO_PER_WORK_UNIT,
                 )
                 self.assertEqual(
                     joined["rewardAddress"], provider.reward_address
@@ -137,7 +145,7 @@ class RemoteJoinTests(unittest.TestCase):
                     "/api/economics"
                 )
                 self.assertEqual(
-                    economics_view["version"], "ctx-economics-v2"
+                    economics_view["version"], "ctx-economics-v4"
                 )
                 provider_view = request_json(
                     f"{provider.attestation_endpoint}/v1/balance"

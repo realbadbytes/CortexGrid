@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from cortexgrid.join_protocol import request_json
@@ -70,6 +73,88 @@ class ParticipationTests(unittest.TestCase):
                     snapshot["metrics"]["dedicatedWorkersOnline"], 0
                 )
 
+                bridge_origin = coordinator_url
+                bridge_url = (
+                    f"{provider.attestation_endpoint}/v1/browser/status"
+                )
+                preflight = urllib.request.Request(
+                    bridge_url,
+                    method="OPTIONS",
+                    headers={
+                        "Origin": bridge_origin,
+                        "Access-Control-Request-Method": "GET",
+                        "Access-Control-Request-Headers": "authorization",
+                        "Access-Control-Request-Private-Network": "true",
+                    },
+                )
+                with urllib.request.urlopen(preflight, timeout=5) as response:
+                    self.assertEqual(response.status, 204)
+                    self.assertEqual(
+                        response.headers["Access-Control-Allow-Origin"],
+                        bridge_origin,
+                    )
+                    self.assertEqual(
+                        response.headers[
+                            "Access-Control-Allow-Private-Network"
+                        ],
+                        "true",
+                    )
+
+                unauthorized = urllib.request.Request(
+                    bridge_url,
+                    headers={"Origin": bridge_origin},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as denied:
+                    urllib.request.urlopen(unauthorized, timeout=5)
+                self.assertEqual(denied.exception.code, 401)
+
+                status_request = urllib.request.Request(
+                    bridge_url,
+                    headers={
+                        "Authorization": f"Bearer {provider.browser_token}",
+                        "Origin": bridge_origin,
+                    },
+                )
+                with urllib.request.urlopen(
+                    status_request, timeout=5
+                ) as response:
+                    browser_status = json.loads(response.read())
+                    self.assertEqual(
+                        response.headers["Access-Control-Allow-Origin"],
+                        bridge_origin,
+                    )
+                self.assertTrue(browser_status["connected"])
+                self.assertEqual(
+                    browser_status["provider"]["nodeId"], provider.node_id
+                )
+
+                browser_prompt = "Run this from CortexGrid Chat."
+                browser_request = urllib.request.Request(
+                    (
+                        f"{provider.attestation_endpoint}"
+                        "/v1/browser/inference"
+                    ),
+                    data=json.dumps({"prompt": browser_prompt}).encode(),
+                    method="POST",
+                    headers={
+                        "Authorization": f"Bearer {provider.browser_token}",
+                        "Content-Type": "application/json",
+                        "Origin": bridge_origin,
+                    },
+                )
+                with urllib.request.urlopen(
+                    browser_request, timeout=30
+                ) as response:
+                    browser_result = json.loads(response.read())
+                self.assertEqual(browser_result["status"], "finalized")
+                self.assertEqual(
+                    browser_result["access"]["participantNodeId"],
+                    provider.node_id,
+                )
+                self.assertGreater(
+                    browser_result["access"]["participantReward"], 0
+                )
+
                 with self.assertRaisesRegex(
                     RuntimeError, "compute participant"
                 ):
@@ -110,6 +195,17 @@ class ParticipationTests(unittest.TestCase):
                 self.assertEqual(
                     result["access"]["mode"], "compute-participant"
                 )
+                self.assertTrue(result["access"]["participantSelected"])
+                self.assertGreater(
+                    result["access"]["participantReward"], 0
+                )
+                self.assertIn(
+                    provider.node_id,
+                    {stage["nodeId"] for stage in result["route"]},
+                )
+                self.assertGreater(
+                    network.node_snapshot(provider.node_id)["balance"], 0
+                )
 
                 with self.assertRaisesRegex(
                     RuntimeError, "already been used"
@@ -122,7 +218,7 @@ class ParticipationTests(unittest.TestCase):
                         },
                     )
 
-                offline_prompt = "This must fail after CortexTerm leaves."
+                offline_prompt = "This must fail after CortexGrid Chat leaves."
                 offline_authorization = provider.authorize_inference(
                     offline_prompt
                 )

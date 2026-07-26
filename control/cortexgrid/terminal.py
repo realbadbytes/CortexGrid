@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import json
 import os
@@ -9,8 +10,10 @@ import secrets
 import socket
 import sys
 import textwrap
+import time
 import urllib.error
 import urllib.request
+import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -19,7 +22,7 @@ from .economics import DEFAULT_PRICE_MICRO_PER_WORK_UNIT
 from .node_daemon import ProviderNode
 
 
-DEFAULT_SERVER = "http://127.0.0.1:4173"
+DEFAULT_SERVER = "http://127.0.0.1:65534"
 MAX_CONTEXT_CHARS = 7_000
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -131,7 +134,7 @@ class CortexSession:
     def ask(self, user_prompt: str) -> dict:
         if self.participation_signer is None:
             raise RuntimeError(
-                "CortexTerm must join as a compute participant before inference"
+                "CortexGrid Chat must join as a compute participant before inference"
             )
         prompt = self.conversation_prompt(user_prompt)
         result = self.api.infer(
@@ -169,10 +172,20 @@ class CortexSession:
                     "2",
                     f"reward {accounting.get('providerRewards', 0)} "
                     f"{accounting.get('symbol', 'CTX')} to compute providers · "
-                    "access earned by online compute participation · "
+                    f"{accounting.get('verifiedWorkUnits', 0)} verified work units · "
                     "requester paid 0 CTX",
                 )
             )
+            access = result.get("access", {})
+            if access.get("participantSelected"):
+                print(
+                    self._paint(
+                        "2",
+                        f"earned {access.get('participantReward', 0)} "
+                        f"{access.get('symbol', 'CTX')} on your node for this "
+                        "inference",
+                    )
+                )
         print()
 
     def print_status(self) -> None:
@@ -228,7 +241,7 @@ HELP = """\
 def interactive(session: CortexSession) -> int:
     session.print_status()
     print(
-        "\nCortexTerm is online as a compute participant. "
+        "\nCortexGrid Chat is online as a compute participant. "
         "Type a message or /help.\n"
     )
     while True:
@@ -307,7 +320,7 @@ def load_or_create_node_id(data_dir: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="CortexTerm",
+        prog="CortexChat",
         description="Chat directly with the CortexGrid distributed inference network",
     )
     parser.add_argument(
@@ -365,7 +378,19 @@ def main() -> None:
     )
     parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--coordinator-public-key")
+    parser.add_argument(
+        "--browser",
+        action="store_true",
+        help="open CortexGrid Chat in a browser and serve the local compute bridge",
+    )
+    parser.add_argument(
+        "--no-browser-open",
+        action="store_true",
+        help="print the browser URL without opening it",
+    )
     args = parser.parse_args()
+    if args.browser and args.prompt is not None:
+        parser.error("--browser and --prompt cannot be used together")
 
     data_dir = args.data_dir or PROJECT_ROOT / ".provider" / "cortexterm"
     node_id = args.node_id or load_or_create_node_id(data_dir)
@@ -374,7 +399,7 @@ def main() -> None:
     provider = ProviderNode(
         coordinator_url=args.server,
         node_id=node_id,
-        name=args.name or f"CortexTerm on {socket.gethostname()}",
+        name=args.name or f"CortexGrid Chat on {socket.gethostname()}",
         operator=args.operator,
         region=args.region,
         memory_gib=(
@@ -399,7 +424,7 @@ def main() -> None:
     except (KeyError, OSError, TypeError, ValueError, RuntimeError) as error:
         provider.close()
         print(
-            f"CortexTerm could not join as a compute participant: {error}",
+            f"CortexGrid Chat could not join as a compute participant: {error}",
             file=sys.stderr,
         )
         raise SystemExit(1) from error
@@ -424,7 +449,41 @@ def main() -> None:
         participant_status=provider.snapshot,
     )
     try:
-        if args.prompt is None:
+        if args.browser:
+            browser_host = provider.advertise_host
+            if ":" in browser_host and not browser_host.startswith("["):
+                browser_host = f"[{browser_host}]"
+            bridge = {
+                "endpoint": f"http://{browser_host}:{provider.api_port}",
+                "token": provider.browser_token,
+                "nodeId": provider.node_id,
+            }
+            encoded_bridge = (
+                base64.urlsafe_b64encode(
+                    json.dumps(
+                        bridge, separators=(",", ":")
+                    ).encode("utf-8")
+                )
+                .decode("ascii")
+                .rstrip("=")
+            )
+            browser_url = (
+                f"{args.server.rstrip('/')}/#cortex-chat={encoded_bridge}"
+            )
+            print(
+                "CortexGrid Chat browser bridge is online.\n"
+                f"Open: {browser_url}",
+                file=sys.stderr,
+            )
+            if not args.no_browser_open:
+                webbrowser.open(browser_url)
+            try:
+                while True:
+                    time.sleep(60)
+            except KeyboardInterrupt:
+                print("\nClosing CortexGrid Chat.", file=sys.stderr)
+            code = 0
+        elif args.prompt is None:
             code = interactive(session)
         else:
             try:
@@ -442,7 +501,7 @@ def main() -> None:
             try:
                 provider.leave_network()
             except (KeyError, OSError, TypeError, ValueError, RuntimeError) as error:
-                print(f"CortexTerm leave failed: {error}", file=sys.stderr)
+                print(f"CortexGrid Chat leave failed: {error}", file=sys.stderr)
         provider.close()
     raise SystemExit(code)
 

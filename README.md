@@ -1,39 +1,26 @@
 # CortexGrid
 
-> **Goal:** let everyone who contributes compute to CortexGrid run language
-> models that would be financially or technically out of reach on one machine.
-> More participating RAM, VRAM, and compute means the network can host larger
-> models, keep more replicas, and serve more inference concurrently.
+> **CortexGrid lets people pool RAM, VRAM, and compute to run language models
+> that would be too large or expensive for any participant to run alone.**
+> Every machine increases model capacity or throughput. Every machine that
+> completes verified inference work earns CTX.
 
-CortexGrid pools member hardware into a distributed inference service. Model
-stages run across native C++/CUDA workers; Python coordinates placement and
-routing. Its proof of work is useful model inference—not arbitrary hashing—and
-finalized work earns workers the CTX cryptocurrency.
+CortexGrid uses a simple centralized coordinator: Python assigns model stages,
+routes inference, verifies work, and finalizes the CTX ledger. C++/CUDA and
+llama.cpp perform model execution on participant hardware.
 
 ```text
-                       signed model assignments
-Coordinator ──────────────────────────────────────────────┐
-    │                                                     │
-    ├── stage 0 / layers 0–14 ── participant A (RAM/GPU) │
-    ├── stage 1 / layers 15–29 ─ participant B (RAM/GPU) │
-    └── replicas / throughput ─── dedicated workers       │
-                                                          │
-CortexGrid Chat ─── distributed inference ── proof ── CTX block/rewards
+                         signed stage assignments
+                    ┌────────── Coordinator ──────────┐
+model weights ─────▶│ layers 0–14  ─▶ provider A     │
+                    │ layers 15–29 ─▶ provider B     │
+                    │ replicas      ─▶ provider C…    │
+                    └─────────────────────────────────┘
+                                      │
+CortexGrid Chat ─▶ distributed inference ─▶ signed proof ─▶ CTX rewards
 ```
 
-## Two ways to participate
-
-1. **Use and serve:** CortexGrid Chat joins as a compute provider, receives a
-   model stage, executes that stage on its own prompts, serves other network
-   jobs, earns CTX for successful work, and lets you chat with the pooled
-   model. Inference access lasts only while your node is online.
-2. **Serve only:** a dedicated worker stays online to host model stages and run
-   inference for others, earning CTX without submitting its own prompts.
-
-Neither role earns CTX merely for being idle. Rewards require selected,
-verified, finalized inference work.
-
-## Run a coordinator
+## Start the network
 
 Requirements: Python 3.11+, CMake 3.20+, a C++20 compiler, OpenSSL development
 headers, and Python `cryptography`. CUDA is optional.
@@ -43,20 +30,19 @@ make bootstrap-model
 make run-real
 ```
 
-The API and dashboard listen at `http://localhost:65534`. Providers should pin
-the `coordinatorPublicKey` returned by `GET /api/health`.
+Open [http://localhost:65534](http://localhost:65534). The dashboard shows live
+network capacity and inference activity, then guides a new machine through
+joining CortexGrid. `COORDINATOR_PUBLIC_KEY` is the `coordinatorPublicKey`
+reported by `/api/health`; confirm it through a trusted channel before joining
+a remote network.
 
-## Use and serve with CortexGrid Chat
+## Join, chat, and earn CTX
 
-First build the provider runtime:
+This mode opens CortexGrid Chat while also offering the machine's compute to
+the network:
 
 ```bash
 make bootstrap-provider
-```
-
-For the browser interface:
-
-```bash
 make chat-browser \
   COORDINATOR_URL=http://COORDINATOR_IP:65534 \
   COORDINATOR_PUBLIC_KEY=OUT_OF_BAND_KEY \
@@ -64,9 +50,9 @@ make chat-browser \
   TERM_MEMORY_GIB=24
 ```
 
-This starts the local compute bridge and opens CortexGrid Chat in the browser.
-The bridge token stays in the URL fragment and is never sent to the
-coordinator. Closing the bridge leaves the network and stops serving.
+The command creates a local provider identity and reward wallet, receives a
+model stage, starts the local compute bridge, and opens the browser. No CTX or
+pre-existing wallet is required. Closing the process leaves the network.
 
 For the terminal interface:
 
@@ -78,27 +64,12 @@ make chat \
   TERM_MEMORY_GIB=24
 ```
 
-CortexGrid Chat creates a provider identity and reward wallet, joins, serves
-its assigned stage, and signs each prompt. You need no existing CTX and no
-manually configured wallet. `/status` shows your stage and CTX balance;
-`/exit` leaves the network.
+Useful commands are `/status`, `/route`, `/proof`, `/new`, `/help`, and
+`/exit`. `/status` shows the hosted stage and current CTX balance.
 
-Useful commands: `/status`, `/route`, `/proof`, `/new`, `/help`, and `/exit`.
-For one prompt:
+## Join as a dedicated worker
 
-```bash
-./CortexChat --server http://COORDINATOR_IP:65534 \
-  --coordinator-public-key OUT_OF_BAND_KEY \
-  --advertise-host THIS_MACHINE_IP \
-  --memory-gib 24 \
-  -p "Explain pipeline parallelism."
-```
-
-Your assigned stage is routed through your node for your own successful prompt,
-so you earn a share of that inference's CTX reward. Your node remains eligible
-for other routed jobs while CortexGrid Chat is online.
-
-## Run a dedicated worker
+A dedicated worker serves inference without opening a chat client:
 
 ```bash
 make bootstrap-provider
@@ -112,7 +83,7 @@ make join \
   ADVERTISE_HOST=THIS_MACHINE_IP
 ```
 
-Inspect or operate it from another terminal:
+Operate it from another terminal:
 
 ```bash
 ./CortexNode status     --node-id my-gpu-01
@@ -123,18 +94,37 @@ Inspect or operate it from another terminal:
 ./CortexNode join       --node-id my-gpu-01
 ```
 
-The signed assignment records the model version, stage, layer range, memory
-requirement, and weights digest. On a selected route, llama.cpp streams the
-assigned tensors into the worker's RAM/VRAM and reuses its cache. Adding memory
-allows larger stage sets; adding replicas and compute increases throughput.
+## Model placement
 
-## CTX and network status
+The model manifest divides weights into ordered layer stages. When a machine
+registers its available memory and compute, the coordinator assigns a stage
+that fits. The signed assignment identifies the model version, layer range,
+memory requirement, and weights digest. llama.cpp transfers those tensors into
+the provider's RAM or VRAM and reuses its local cache.
 
-CTX balances live on-chain at each provider's reward address. The controlling
-key is local: `.provider/NODE_ID/node_wallet.json` for dedicated workers and
-`.provider/cortexterm/node_wallet.json` for the default CortexGrid Chat
-identity. The old directory name is retained for wallet compatibility. Back it
-up securely.
+Inference runs through one provider for each stage. More aggregate memory lets
+the network place larger models; more replicas and compute increase throughput
+and fault tolerance.
+
+## CTX
+
+CTX is created only for completed, verified inference:
+
+```text
+provider reward = verified work units × 0.0001 CTX
+```
+
+Every selected provider signs a work receipt. The coordinator verifies the
+route, model commitments, output commitments, signatures, and reward amount
+before finalizing a block and crediting provider reward addresses. Idle,
+offline, invalid, and unselected machines mint nothing. Supply is capped at
+1 billion CTX.
+
+Balances are stored on the CTX ledger. The key controlling a worker's address
+stays in `.provider/NODE_ID/node_wallet.json`; the default chat identity uses
+`.provider/cortexterm/node_wallet.json` for compatibility.
+
+Network APIs:
 
 ```bash
 curl http://COORDINATOR_IP:65534/api/network
@@ -143,23 +133,20 @@ curl http://COORDINATOR_IP:65534/api/chain
 curl http://COORDINATOR_IP:65534/api/economics
 ```
 
-Every selected provider earns `0.0001 CTX × verified work units`. More
-successful processing earns more CTX; idle or invalid nodes earn nothing.
-End-user billing is separate from the token ledger. There are no CTX inference
-fees, fee splits, burns, epochs, halvings, or block jackpots. See
-[docs/ECONOMICS.md](docs/ECONOMICS.md).
+See [CTX economics](docs/ECONOMICS.md) and the
+[protocol](docs/PROTOCOL.md) for ledger and proof details.
 
-## Verify and current boundary
+## Verify
 
 ```bash
 make test
 make test-real
 ```
 
-The included real-model demo uses SmolLM2 135M; the architecture is the path to
-much larger manifests, not a claim that the devnet is production-ready.
-Registration, assignments, participation access, work tickets, and receipts
-are signed. Upstream llama.cpp RPC tensor transport is still unauthenticated,
-so provider ports must remain on a trusted private network or VPN. Worker
-receipts prove attributable participation, not Byzantine-safe numerical
-correctness. CTX has no guaranteed market value or exchange listing.
+The included real-model demo uses SmolLM2 135M. The manifest and placement
+architecture can describe much larger models, but the devnet is not yet a
+production-scale multi-terabyte deployment. Registration, assignments, work
+tickets, and receipts are signed. The upstream llama.cpp tensor RPC must still
+run on a trusted private network or VPN. Work signatures prove attributable
+participation, not Byzantine-safe numerical correctness. CTX has no guaranteed
+market value or exchange listing.
